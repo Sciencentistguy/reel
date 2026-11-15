@@ -64,6 +64,13 @@ pub struct MetadataConfig {
     pub tmdb_api_key: String,
     /// TVDB v4 API key. `TVDB_API_KEY` overrides it.
     pub tvdb_api_key: String,
+    /// File holding the TMDB key, for keeping secrets out of the configuration file. Used when
+    /// neither `tmdb_api_key` nor `TMDB_API_KEY` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tmdb_api_key_file: Option<PathBuf>,
+    /// File holding the TVDB key, used like `tmdb_api_key_file`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tvdb_api_key_file: Option<PathBuf>,
     /// TMDB language tag.
     pub tmdb_language: String,
     /// TVDB three-letter language code.
@@ -107,17 +114,28 @@ impl Default for MetadataConfig {
             tv_source: TvSource::Tvdb,
             tmdb_api_key: String::new(),
             tvdb_api_key: String::new(),
+            tmdb_api_key_file: None,
+            tvdb_api_key_file: None,
             tmdb_language: "en-US".into(),
             tvdb_language: "eng".into(),
         }
     }
 }
 
+const SYSTEM_PATH: &str = "/etc/reel/config.toml";
+
+/// The user's configuration file, or the system-wide one when the user has none.
 pub fn default_path() -> PathBuf {
-    dirs::config_dir()
+    let user = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("reel")
-        .join("config.toml")
+        .join("config.toml");
+    let system = Path::new(SYSTEM_PATH);
+    if !user.exists() && system.exists() {
+        system.to_path_buf()
+    } else {
+        user
+    }
 }
 
 /// Expands a leading `~` and resolves relative paths against the config file's directory.
@@ -148,14 +166,32 @@ impl Config {
         ] {
             *dir = resolve(dir, config_dir);
         }
-        for (var, key) in [
-            ("TMDB_API_KEY", &mut config.metadata.tmdb_api_key),
-            ("TVDB_API_KEY", &mut config.metadata.tvdb_api_key),
+        let metadata = &mut config.metadata;
+        for (var, key, file) in [
+            (
+                "TMDB_API_KEY",
+                &mut metadata.tmdb_api_key,
+                &metadata.tmdb_api_key_file,
+            ),
+            (
+                "TVDB_API_KEY",
+                &mut metadata.tvdb_api_key,
+                &metadata.tvdb_api_key_file,
+            ),
         ] {
             if let Ok(value) = std::env::var(var)
                 && !value.is_empty()
             {
                 *key = value;
+            } else if key.is_empty()
+                && let Some(file) = file
+            {
+                let file = resolve(file, config_dir);
+                // Only imports need the key, so an unreadable file must not break other commands.
+                match std::fs::read_to_string(&file) {
+                    Ok(contents) => *key = contents.trim().to_string(),
+                    Err(err) => eprintln!("warning: cannot read {}: {err}", file.display()),
+                }
             }
         }
         Ok(config)
@@ -176,5 +212,38 @@ impl Config {
             }
         }
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_and_key_files_resolve_against_the_config_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tvdb.key"), "secret\n").unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[library]\nmovies = \"Movies\"\ntv = \"/abs/TV\"\n\
+             [metadata]\ntvdb_api_key_file = \"tvdb.key\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.library.movies, dir.path().join("Movies"));
+        assert_eq!(config.library.tv, Path::new("/abs/TV"));
+        if std::env::var_os("TVDB_API_KEY").is_none() {
+            assert_eq!(config.metadata.tvdb_api_key, "secret");
+        }
+        assert!(config.redacted().to_toml().unwrap().contains("<redacted>"));
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[library]\nmovie = \"x\"\n").unwrap();
+        assert!(Config::load(&path).is_err());
     }
 }
