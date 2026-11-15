@@ -120,10 +120,11 @@ pub fn default_path() -> PathBuf {
         .join("config.toml")
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
+/// Expands a leading `~` and resolves relative paths against the config file's directory.
+fn resolve(path: &Path, config_dir: &Path) -> PathBuf {
     match (path.strip_prefix("~"), dirs::home_dir()) {
         (Ok(rest), Some(home)) => home.join(rest),
-        _ => path.to_path_buf(),
+        _ => config_dir.join(path),
     }
 }
 
@@ -138,12 +139,14 @@ impl Config {
                 return Err(err).with_context(|| format!("cannot read {}", path.display()));
             }
         };
+        let config_dir = std::path::absolute(path)?;
+        let config_dir = config_dir.parent().unwrap_or(Path::new("/"));
         for dir in [
             &mut config.library.database,
             &mut config.library.movies,
             &mut config.library.tv,
         ] {
-            *dir = expand_tilde(dir);
+            *dir = resolve(dir, config_dir);
         }
         for (var, key) in [
             ("TMDB_API_KEY", &mut config.metadata.tmdb_api_key),
