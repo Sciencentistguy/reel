@@ -13,9 +13,9 @@
     in
     {
       packages = forAllSystems (pkgs: {
-        default = self.packages.${pkgs.stdenv.hostPlatform.system}.vlib;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.reel;
 
-        vlib = pkgs.rustPlatform.buildRustPackage {
+        reel = pkgs.rustPlatform.buildRustPackage {
           pname = manifest.name;
           inherit (manifest) version;
 
@@ -38,21 +38,21 @@
 
           # ffprobe supplies the media information recorded on import.
           postInstall = ''
-            wrapProgram $out/bin/vlib \
+            wrapProgram $out/bin/reel \
               --suffix PATH : ${lib.makeBinPath [ pkgs.ffmpeg-headless ]}
           '';
 
           meta = {
             inherit (manifest) description;
             license = lib.licenses.gpl3;
-            mainProgram = "vlib";
+            mainProgram = "reel";
           };
         };
       });
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.vlib ];
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.reel ];
           packages = [
             pkgs.clippy
             pkgs.rustfmt

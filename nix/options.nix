@@ -8,13 +8,13 @@ in
   inherit toml;
 
   options = {
-    enable = lib.mkEnableOption "vlib, a library manager for films and TV shows";
+    enable = lib.mkEnableOption "reel, a library manager for films and TV shows";
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.vlib;
-      defaultText = lib.literalExpression "vlib.packages.\${system}.vlib";
-      description = "The vlib package to install.";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.reel;
+      defaultText = lib.literalExpression "reel.packages.\${system}.reel";
+      description = "The reel package to install.";
     };
 
     settings = lib.mkOption {
@@ -35,7 +35,7 @@ in
         }
       '';
       description = ''
-        Contents of vlib's `config.toml`; anything left out keeps its default.
+        Contents of reel's `config.toml`; anything left out keeps its default.
 
         The file ends up world-readable in the Nix store, so supply API keys through
         `metadata.tmdb_api_key_file` and `metadata.tvdb_api_key_file` rather than inline.

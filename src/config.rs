@@ -84,7 +84,7 @@ impl Default for LibraryConfig {
             .or_else(|| dirs::home_dir().map(|home| home.join("Videos")))
             .unwrap_or_else(|| PathBuf::from("."));
         LibraryConfig {
-            database: data.join("vlib").join("library.db"),
+            database: data.join("reel").join("library.db"),
             movies: videos.join("Movies"),
             tv: videos.join("TV Shows"),
         }
@@ -122,13 +122,13 @@ impl Default for MetadataConfig {
     }
 }
 
-const SYSTEM_PATH: &str = "/etc/vlib/config.toml";
+const SYSTEM_PATH: &str = "/etc/reel/config.toml";
 
 /// The user's configuration file, or the system-wide one when the user has none.
 pub fn default_path() -> PathBuf {
     let user = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("vlib")
+        .join("reel")
         .join("config.toml");
     let system = Path::new(SYSTEM_PATH);
     if !user.exists() && system.exists() {

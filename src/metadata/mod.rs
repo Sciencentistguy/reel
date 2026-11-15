@@ -54,7 +54,7 @@ pub fn show_source(config: &MetadataConfig) -> Result<Box<dyn ShowSource>> {
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
-        .user_agent(concat!("vlib/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("reel/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
 }

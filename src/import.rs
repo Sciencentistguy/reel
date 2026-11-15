@@ -617,7 +617,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
     println!("\n{verb} {imported} file(s); skipped {skipped}.");
     if importer.versioned {
         println!(
-            "Some items now have several versions; `vlib move` adds version suffixes to the older copies."
+            "Some items now have several versions; `reel move` adds version suffixes to the older copies."
         );
     }
     Ok(())

@@ -1,7 +1,7 @@
-# vlib
+# reel
 
 A library manager for films and TV shows, in the spirit of [beets](https://github.com/beetbox/beets).
-`vlib` identifies video files, files them into a directory tree that follows Plex's naming
+`reel` identifies video files, files them into a directory tree that follows Plex's naming
 conventions for [films](https://support.plex.tv/articles/naming-and-organizing-your-movie-media-files/)
 and [TV shows](https://support.plex.tv/articles/naming-and-organizing-your-tv-show-files/), and keeps
 a queryable SQLite database of what it has imported.
@@ -21,14 +21,14 @@ TV Shows/
 
 ```sh
 cargo install --path .  # or: nix profile install . (bundles ffprobe)
-vlib config --init      # writes ~/.config/vlib/config.toml
+reel config --init      # writes ~/.config/reel/config.toml
 ```
 
 Then edit the configuration:
 
 ```toml
 [library]
-database = "~/.local/share/vlib/library.db"
+database = "~/.local/share/reel/library.db"
 movies = "~/Videos/Movies"
 tv = "~/Videos/TV Shows"
 
@@ -55,20 +55,20 @@ Films are always matched against TMDB. Shows are matched against TVDB by default
 API keys can also be kept in separate files with `tmdb_api_key_file` and `tvdb_api_key_file`.
 A key is taken from the environment variable first, then the inline setting, then the file.
 
-When a user has no configuration file, `/etc/vlib/config.toml` is used if it exists.
+When a user has no configuration file, `/etc/reel/config.toml` is used if it exists.
 
 ### NixOS and home-manager
 
-The flake provides `nixosModules.default` and `homeManagerModules.default`. Both install `vlib`
-(with `ffprobe`) and generate its configuration from `programs.vlib.settings`, which takes the same
-keys as `config.toml`. The home-manager module writes `~/.config/vlib/config.toml`; the NixOS
-module writes the system-wide `/etc/vlib/config.toml`.
+The flake provides `nixosModules.default` and `homeManagerModules.default`. Both install `reel`
+(with `ffprobe`) and generate its configuration from `programs.reel.settings`, which takes the same
+keys as `config.toml`. The home-manager module writes `~/.config/reel/config.toml`; the NixOS
+module writes the system-wide `/etc/reel/config.toml`.
 
 ```nix
 {
-  imports = [ inputs.vlib.homeManagerModules.default ]; # or nixosModules.default
+  imports = [ inputs.reel.homeManagerModules.default ]; # or nixosModules.default
 
-  programs.vlib = {
+  programs.reel = {
     enable = true;
     settings = {
       library = {
@@ -105,7 +105,7 @@ tvdb_api_key = "..."
 ```
 
 ```sh
-export VLIB_CONFIG=$PWD/dev/config.toml   # or pass -c dev/config.toml each time
+export REEL_CONFIG=$PWD/dev/config.toml   # or pass -c dev/config.toml each time
 cargo run -- import -n ~/Downloads/some-show
 nix run . -- stats                        # the same, built by Nix
 ```
@@ -114,19 +114,19 @@ nix run . -- stats                        # the same, built by Nix
 
 | Command | Purpose |
 | --- | --- |
-| `vlib import PATH...` | Identify files and file them into the library |
-| `vlib list [QUERY]` | List items (`-f` for a template, `-p` for paths) |
-| `vlib info [QUERY]` | Show everything known about items, including streams |
-| `vlib move [QUERY]` | Rename files to match the current naming scheme |
-| `vlib update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
-| `vlib remove QUERY` | Remove items from the library (`-d` also deletes the files) |
-| `vlib stats [QUERY]` | Summarise the library |
-| `vlib fields` | List fields usable in queries and templates |
-| `vlib config` | Show the effective configuration |
+| `reel import PATH...` | Identify files and file them into the library |
+| `reel list [QUERY]` | List items (`-f` for a template, `-p` for paths) |
+| `reel info [QUERY]` | Show everything known about items, including streams |
+| `reel move [QUERY]` | Rename files to match the current naming scheme |
+| `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
+| `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
+| `reel stats [QUERY]` | Summarise the library |
+| `reel fields` | List fields usable in queries and templates |
+| `reel config` | Show the effective configuration |
 
 ### Importing
 
-`vlib import` walks the given paths, guesses a title, year and episode numbering from each file
+`reel import` walks the given paths, guesses a title, year and episode numbering from each file
 name (falling back to parent directories), and groups files by film or show. Each group is looked
 up once. A confident match is applied automatically; otherwise you choose from the candidates,
 search again, enter an ID, use the names as they are, or skip. `--quiet` never prompts and skips
@@ -137,7 +137,7 @@ Handled along the way:
 - Plex `{tmdb-…}`/`{tvdb-…}` tags already present in names are used for a direct lookup.
 - Editions (`{edition-Director's Cut}`) and split films (`- pt1`).
 - Multiple versions of the same film or episode gain a resolution suffix (`- 1080p`). The copy
-  already in the library is renamed the next time `vlib move` runs.
+  already in the library is renamed the next time `reel move` runs.
 - Multi-episode files (`s02e01-e03`), specials (`Season 00`) and date-based shows.
 - Sidecar subtitles are renamed with their video, keeping suffixes such as `.en.forced.srt`.
 - Samples and Plex extras folders (`Featurettes`, `Trailers`, …) are ignored.
@@ -148,12 +148,12 @@ Queries follow beets: bare words match film, show and episode titles; `field:val
 field; terms are ANDed; `^` negates a term.
 
 ```sh
-vlib ls kind:movie year:1990..1999
-vlib ls hdr:dv dv_profile:fel            # Dolby Vision profile 7 FEL
-vlib ls hdr:hdr10+ ^atmos:true           # HDR10+ without any Atmos track
-vlib ls audio_codec:truehd audio_channels:8
-vlib ls subtitle_language:eng subtitle_forced:true
-vlib ls -f '$title ($year) $resolution $hdr $audio_codec' doctor season:1
+reel ls kind:movie year:1990..1999
+reel ls hdr:dv dv_profile:fel            # Dolby Vision profile 7 FEL
+reel ls hdr:hdr10+ ^atmos:true           # HDR10+ without any Atmos track
+reel ls audio_codec:truehd audio_channels:8
+reel ls subtitle_language:eng subtitle_forced:true
+reel ls -f '$title ($year) $resolution $hdr $audio_codec' doctor season:1
 ```
 
 Text fields match substrings, or exactly with `field:=value`. Numeric fields accept `n`, `a..b`,
