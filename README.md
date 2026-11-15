@@ -52,6 +52,40 @@ tvdb_language = "eng"
 Films are always matched against TMDB. Shows are matched against TVDB by default, or TMDB with
 `tv_source = "tmdb"`. `ffprobe` (from ffmpeg) must be on `PATH` for media information.
 
+API keys can also be kept in separate files with `tmdb_api_key_file` and `tvdb_api_key_file`.
+A key is taken from the environment variable first, then the inline setting, then the file.
+
+When a user has no configuration file, `/etc/reel/config.toml` is used if it exists.
+
+### NixOS and home-manager
+
+The flake provides `nixosModules.default` and `homeManagerModules.default`. Both install `reel`
+(with `ffprobe`) and generate its configuration from `programs.reel.settings`, which takes the same
+keys as `config.toml`. The home-manager module writes `~/.config/reel/config.toml`; the NixOS
+module writes the system-wide `/etc/reel/config.toml`.
+
+```nix
+{
+  imports = [ inputs.reel.homeManagerModules.default ]; # or nixosModules.default
+
+  programs.reel = {
+    enable = true;
+    settings = {
+      library = {
+        movies = "/srv/media/Movies";
+        tv = "/srv/media/TV Shows";
+      };
+      import.operation = "hardlink";
+      metadata = {
+        # The generated file is world-readable in the Nix store: point at secrets, don't inline them.
+        tmdb_api_key_file = "/run/secrets/tmdb";
+        tvdb_api_key_file = "/run/secrets/tvdb";
+      };
+    };
+  };
+}
+```
+
 ### Running from a checkout
 
 For testing without installing or touching your real library, keep a throwaway configuration in
