@@ -20,7 +20,7 @@ TV Shows/
 ## Setup
 
 ```sh
-cargo install --path .
+cargo install --path .  # or: nix profile install . (bundles ffprobe)
 reel config --init      # writes ~/.config/reel/config.toml
 ```
 
