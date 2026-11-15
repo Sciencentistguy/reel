@@ -164,7 +164,20 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// Exit quietly, as other command-line tools do, when output is piped into something like `head`.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: called before any other thread exists, and SIG_DFL is always a valid disposition.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
+
 fn main() -> ExitCode {
+    restore_sigpipe();
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

@@ -650,6 +650,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "libc",
  "reflink-copy",
  "regex",
  "rusqlite",
