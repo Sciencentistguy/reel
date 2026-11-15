@@ -2,5 +2,22 @@
 name = "reel"
 version = "0.1.0"
 edition = "2024"
+description = "Library manager for films and TV shows using Plex naming conventions"
+license-file = "LICENCE"
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+dirs = "7.0.0"
+reflink-copy = "0.1.33"
+regex = "1.13.1"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+strsim = "0.11.1"
+toml = "1.2.1"
+ureq = { version = "3.5.2", features = ["json"] }
+walkdir = "2.5.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
