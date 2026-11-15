@@ -7,7 +7,7 @@ license-file = "LICENCE"
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 dirs = "7.0.0"
 reflink-copy = "0.1.33"
 regex = "1.13.1"

@@ -52,6 +52,30 @@ tvdb_language = "eng"
 Films are always matched against TMDB. Shows are matched against TVDB by default, or TMDB with
 `tv_source = "tmdb"`. `ffprobe` (from ffmpeg) must be on `PATH` for media information.
 
+### Running from a checkout
+
+For testing without installing or touching your real library, keep a throwaway configuration in
+the git-ignored `dev/` directory. Relative paths in a configuration file are resolved against the
+file's own directory, so everything stays inside `dev/`:
+
+```toml
+# dev/config.toml
+[library]
+database = "library.db"
+movies = "Movies"
+tv = "TV Shows"
+
+[metadata]
+tmdb_api_key = "..."
+tvdb_api_key = "..."
+```
+
+```sh
+export VLIB_CONFIG=$PWD/dev/config.toml   # or pass -c dev/config.toml each time
+cargo run -- import -n ~/Downloads/some-show
+nix run . -- stats                        # the same, built by Nix
+```
+
 ## Commands
 
 | Command | Purpose |

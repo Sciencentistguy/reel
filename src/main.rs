@@ -26,7 +26,7 @@ use query::Query;
 #[command(version, about)]
 struct Cli {
     /// Configuration file to use instead of the default.
-    #[arg(short, long, global = true, value_name = "FILE")]
+    #[arg(short, long, global = true, value_name = "FILE", env = "VLIB_CONFIG")]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
