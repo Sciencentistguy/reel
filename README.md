@@ -20,7 +20,7 @@ TV Shows/
 ## Setup
 
 ```sh
-cargo install --path .
+cargo install --path .  # or: nix profile install . (bundles ffprobe)
 vlib config --init      # writes ~/.config/vlib/config.toml
 ```
 

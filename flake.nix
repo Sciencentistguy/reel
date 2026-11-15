@@ -29,7 +29,12 @@
           };
           cargoLock.lockFile = ./Cargo.lock;
 
-          nativeBuildInputs = [ pkgs.makeBinaryWrapper ];
+          nativeBuildInputs = [
+            pkgs.makeBinaryWrapper
+            pkgs.pkg-config
+          ];
+          # nixpkgs links libsqlite3-sys against the system SQLite rather than the bundled copy.
+          buildInputs = [ pkgs.sqlite ];
 
           # ffprobe supplies the media information recorded on import.
           postInstall = ''
@@ -57,6 +62,6 @@
         };
       });
 
-      formatter = forAllSystems (pkgs: pkgs.nixfmt-rfc-style);
+      formatter = forAllSystems (pkgs: pkgs.nixfmt);
     };
 }
