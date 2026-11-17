@@ -140,21 +140,7 @@ impl Library {
     fn init(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
-        Self::add_missing_columns(&conn)?;
         Ok(Library { conn })
-    }
-
-    /// Brings a database created by an older version up to the current schema.
-    fn add_missing_columns(conn: &Connection) -> Result<()> {
-        let has_original_path: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('items') WHERE name = 'original_path')",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_original_path {
-            conn.execute("ALTER TABLE items ADD COLUMN original_path TEXT", [])?;
-        }
-        Ok(())
     }
 
     pub fn contains_path(&self, path: &Path) -> Result<bool> {
@@ -517,17 +503,6 @@ mod tests {
         library.save(&mut item).unwrap();
         let found = library.query(&Query::parse(&["matrix"]).unwrap()).unwrap();
         assert_eq!(found[0].original_path, item.original_path);
-    }
-
-    #[test]
-    fn upgrades_database_without_original_path() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(&SCHEMA.replace("    original_path TEXT,\n", ""))
-            .unwrap();
-        let mut library = Library::init(conn).unwrap();
-        let mut item = sample().remove(0);
-        item.original_path = Some("/downloads/matrix.mkv".into());
-        library.save(&mut item).unwrap();
     }
 
     #[test]
