@@ -67,6 +67,7 @@ impl From<Movie> for Candidate {
         Candidate {
             source: "tmdb",
             id: movie.id.to_string(),
+            url: format!("https://www.themoviedb.org/movie/{}", movie.id),
             year: year_of(movie.release_date.as_deref()),
             original_title: distinct_from(&movie.title, movie.original_title),
             overview: non_empty(movie.overview),
@@ -80,6 +81,7 @@ impl From<Show> for Candidate {
         Candidate {
             source: "tmdb",
             id: show.id.to_string(),
+            url: format!("https://www.themoviedb.org/tv/{}", show.id),
             year: year_of(show.first_air_date.as_deref()),
             original_title: distinct_from(&show.name, show.original_name),
             overview: non_empty(show.overview),

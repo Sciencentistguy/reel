@@ -17,6 +17,8 @@ pub struct Candidate {
     pub id: String,
     pub title: String,
     pub year: Option<i32>,
+    /// The candidate's page on the source's website.
+    pub url: String,
     /// The title in its original language, when it differs from `title`.
     pub original_title: Option<String>,
     pub overview: Option<String>,
@@ -151,6 +153,7 @@ mod tests {
             id: "1".into(),
             title: title.into(),
             year: Some(year),
+            url: String::new(),
             original_title: None,
             overview: None,
         }

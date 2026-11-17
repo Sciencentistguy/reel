@@ -81,6 +81,10 @@ struct Episode {
     aired: Option<String>,
 }
 
+fn series_url(id: &str) -> String {
+    format!("https://thetvdb.com/?tab=series&id={id}")
+}
+
 impl Tvdb {
     pub fn new(config: &MetadataConfig) -> Result<Self> {
         if config.tvdb_api_key.is_empty() {
@@ -154,6 +158,7 @@ impl ShowSource for Tvdb {
                 let title = translated.unwrap_or_else(|| result.name.clone());
                 Candidate {
                     source: "tvdb",
+                    url: series_url(&result.tvdb_id),
                     id: result.tvdb_id,
                     original_title: distinct_from(&title, Some(result.name)),
                     overview: non_empty(translated_overview).or(non_empty(result.overview)),
@@ -182,6 +187,7 @@ impl ShowSource for Tvdb {
         let title = translated.unwrap_or_else(|| series.name.clone());
         Ok(Candidate {
             source: "tvdb",
+            url: series_url(&series.id.to_string()),
             id: series.id.to_string(),
             original_title: distinct_from(&title, Some(series.name)),
             overview: non_empty(translated_overview).or(non_empty(series.overview)),

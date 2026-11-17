@@ -267,6 +267,21 @@ fn truncate(text: &str, width: usize) -> String {
     format!("{}…", kept.trim_end_matches([',', ';', ':', '.', '-']))
 }
 
+/// The candidate's title and year, as a terminal hyperlink to its web page when stdout is a terminal.
+fn describe_candidate(candidate: &Candidate) -> String {
+    let text = describe(&candidate.title, candidate.year);
+    if io::stdout().is_terminal() {
+        hyperlink(&text, &candidate.url)
+    } else {
+        text
+    }
+}
+
+/// Wraps `text` in an OSC 8 escape sequence linking it to `url`.
+fn hyperlink(text: &str, url: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+}
+
 fn match_percent(distance: f64) -> String {
     let colour = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     colour_percent(((1.0 - distance) * 100.0).round(), colour)
@@ -305,7 +320,7 @@ fn decide(
             Ok(candidate) => {
                 println!(
                     "  Matched by ID: {} [{source}-{id}]",
-                    describe(&candidate.title, candidate.year)
+                    describe_candidate(&candidate)
                 );
                 return Ok(Decision::Use(candidate));
             }
@@ -325,7 +340,7 @@ fn decide(
             let (distance, candidate) = ranked.into_iter().next().unwrap();
             println!(
                 "  Matched: {} [{}-{}] ({})",
-                describe(&candidate.title, candidate.year),
+                describe_candidate(&candidate),
                 candidate.source,
                 candidate.id,
                 match_percent(distance)
@@ -355,7 +370,7 @@ fn decide(
             println!(
                 "  {}. {} [{}-{}] ({}){known}",
                 number + 1,
-                describe(&candidate.title, candidate.year),
+                describe_candidate(candidate),
                 candidate.source,
                 candidate.id,
                 match_percent(*distance)
@@ -785,6 +800,14 @@ mod tests {
         assert_eq!(code(75.0), "\x1b[33m75%\x1b[0m");
         assert_eq!(code(66.0), "\x1b[31m66%\x1b[0m");
         assert_eq!(colour_percent(98.0, false), "98%");
+    }
+
+    #[test]
+    fn hyperlinks_use_osc_8() {
+        assert_eq!(
+            hyperlink("Dune (2021)", "https://example.com/1"),
+            "\x1b]8;;https://example.com/1\x1b\\Dune (2021)\x1b]8;;\x1b\\"
+        );
     }
 
     #[test]
