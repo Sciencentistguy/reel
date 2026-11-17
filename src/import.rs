@@ -256,6 +256,7 @@ fn decide(
     library: &Library,
     threshold: f64,
     interactive: bool,
+    edition: &mut Option<Option<String>>,
 ) -> Result<Decision> {
     if let Some((source, id)) = &group.id_hint
         && source == lookup.source()
@@ -323,8 +324,13 @@ fn decide(
                 let first_known = in_library.iter().position(|&count| count > 0);
                 (first_known.unwrap_or(0) + 1).to_string()
             };
+            let edition_choice = if group.kind == Kind::Movie {
+                ", edi[t]ion"
+            } else {
+                ""
+            };
             let Some(answer) = prompt(&format!(
-                "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d, a[b]ort? [{default}] "
+                "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d{edition_choice}, a[b]ort? [{default}] "
             ))?
             else {
                 return Ok(Decision::Abort);
@@ -350,6 +356,17 @@ fn decide(
                     year = new_year.parse().ok();
                     searched_manually = true;
                     break;
+                }
+                "t" if group.kind == Kind::Movie => {
+                    let Some(answer) = prompt("  Edition (blank for none): ")? else {
+                        return Ok(Decision::Abort);
+                    };
+                    let name = Some(answer).filter(|answer| !answer.is_empty());
+                    match &name {
+                        Some(name) => println!("  Edition set to {name:?}."),
+                        None => println!("  Edition cleared."),
+                    }
+                    *edition = Some(name);
                 }
                 "i" => {
                     let Some(id) = prompt(&format!("  {} ID: ", lookup.source()))? else {
@@ -622,6 +639,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
             group.files.len()
         );
 
+        let mut edition = None;
         let decision = if options.asis {
             Decision::AsIs
         } else {
@@ -645,6 +663,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
                 importer.library,
                 config.import.strong_match,
                 interactive,
+                &mut edition,
             )?
         };
         let candidate = match decision {
@@ -667,7 +686,9 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
             let mut item = base_item(&group, file, candidate.as_ref());
             match group.kind {
                 Kind::Movie => {
-                    item.edition = file.parsed.edition.clone();
+                    item.edition = edition
+                        .clone()
+                        .unwrap_or_else(|| file.parsed.edition.clone());
                     item.part = file.parsed.part;
                 }
                 Kind::Episode => {
