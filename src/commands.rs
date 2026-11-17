@@ -1,7 +1,7 @@
 //! Library maintenance commands: list, info, move, update, remove and stats.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -135,38 +135,53 @@ pub fn move_items(
     let mut moved = 0;
     let mut claimed = HashSet::new();
     for mut item in library.query(query)? {
-        let versioned = library.has_other_versions(&item)?;
-        let destination = naming::free_destination(config, &item, versioned, &item.path, |path| {
-            claimed.contains(path) || path.symlink_metadata().is_ok()
-        });
-        claimed.insert(destination.clone());
-        if destination == item.path {
-            continue;
-        }
-        println!("{}\n  -> {}", item.path.display(), destination.display());
-        if pretend {
-            moved += 1;
-            continue;
-        }
-        let sidecars = naming::sidecars(&item.path);
-        if let Err(err) = fileops::transfer(&item.path, &destination, Operation::Move) {
-            eprintln!("  error: {err:#}");
-            continue;
-        }
-        for (sidecar, suffix) in sidecars {
-            let target = naming::sidecar_destination(&destination, &suffix);
-            if let Err(err) = fileops::transfer(&sidecar, &target, Operation::Move) {
-                eprintln!("  warning: {err:#}");
+        if relocate(config, library, &mut item, &mut claimed, pretend)? {
+            if !pretend {
+                library.save(&mut item)?;
             }
+            moved += 1;
         }
-        prune(config, &item);
-        item.path = destination;
-        library.save(&mut item)?;
-        moved += 1;
     }
     let verb = if pretend { "Would move" } else { "Moved" };
     println!("{verb} {moved} file(s).");
     Ok(())
+}
+
+/// Moves an item's file and sidecars to where its metadata says it belongs, updating its path
+/// but not saving it. Returns whether it moved, or would have when pretending.
+pub fn relocate(
+    config: &Config,
+    library: &Library,
+    item: &mut Item,
+    claimed: &mut HashSet<PathBuf>,
+    pretend: bool,
+) -> Result<bool> {
+    let versioned = library.has_other_versions(item)?;
+    let destination = naming::free_destination(config, item, versioned, &item.path, |path| {
+        claimed.contains(path) || path.symlink_metadata().is_ok()
+    });
+    claimed.insert(destination.clone());
+    if destination == item.path {
+        return Ok(false);
+    }
+    println!("{}\n  -> {}", item.path.display(), destination.display());
+    if pretend {
+        return Ok(true);
+    }
+    let sidecars = naming::sidecars(&item.path);
+    if let Err(err) = fileops::transfer(&item.path, &destination, Operation::Move) {
+        eprintln!("  error: {err:#}");
+        return Ok(false);
+    }
+    for (sidecar, suffix) in sidecars {
+        let target = naming::sidecar_destination(&destination, &suffix);
+        if let Err(err) = fileops::transfer(&sidecar, &target, Operation::Move) {
+            eprintln!("  warning: {err:#}");
+        }
+    }
+    prune(config, item);
+    item.path = destination;
+    Ok(true)
 }
 
 fn prune(config: &Config, item: &Item) {

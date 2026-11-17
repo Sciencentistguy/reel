@@ -67,6 +67,15 @@ pub fn show_source(config: &MetadataConfig) -> Result<Box<dyn ShowSource>> {
     })
 }
 
+/// The show source called `name`, regardless of which one the configuration prefers.
+pub fn show_source_named(config: &MetadataConfig, name: &str) -> Result<Box<dyn ShowSource>> {
+    Ok(match name {
+        "tvdb" => Box::new(tvdb::Tvdb::new(config)?),
+        "tmdb" => Box::new(tmdb::Tmdb::new(config)?),
+        _ => bail!("unknown metadata source {name:?}"),
+    })
+}
+
 type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
 
 /// Statuses that mean the service is rate limiting or briefly unavailable.
@@ -763,6 +772,8 @@ mod tests {
         assert_eq!(show_source(&config).unwrap().name(), "tvdb");
         config.tv_source = TvSource::Tmdb;
         assert_eq!(show_source(&config).unwrap().name(), "tmdb");
+        assert_eq!(show_source_named(&config, "tvdb").unwrap().name(), "tvdb");
+        assert!(show_source_named(&config, "imdb").is_err());
     }
 
     #[test]

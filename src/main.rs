@@ -15,6 +15,7 @@ mod naming;
 mod parse;
 mod probe;
 mod query;
+mod sync;
 
 use config::Config;
 use library::Library;
@@ -62,6 +63,8 @@ enum Command {
         pretend: bool,
         query: Vec<String>,
     },
+    /// Refresh identified items from their metadata source and rename files to match.
+    Sync(sync::Options),
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
         #[arg(short = 'n', long, visible_alias = "dry-run")]
@@ -133,6 +136,7 @@ fn run(cli: Cli) -> Result<()> {
             &Query::parse(&query)?,
             pretend,
         ),
+        Command::Sync(options) => sync::run(&config, &mut open_library()?, &options),
         Command::Update {
             pretend,
             force,
@@ -259,6 +263,7 @@ mod tests {
         assert!(parse(&["list"]).is_ok());
         assert!(parse(&["stats"]).is_ok());
         assert!(parse(&["rescan"]).is_ok());
+        assert!(parse(&["sync", "-nM", "kind:episode"]).is_ok());
     }
 
     #[test]

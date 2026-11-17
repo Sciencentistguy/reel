@@ -96,6 +96,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel list [QUERY]` | List items (`-f` for a template, `-p` for paths) |
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
+| `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel stats [QUERY]` | Summarise the library |
@@ -123,6 +124,13 @@ paths given), identifies files the database doesn't know about exactly as `impor
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
 names in line with the naming scheme. It accepts the same `--quiet`, `--timid`, `--no-timid`,
 `--asis` and `--pretend` flags, and never removes rows (that's `reel update`).
+
+`reel sync` refreshes items that were matched to TMDB or TVDB. It fetches each film or show once
+from the source it was matched against (even if `tv_source` has changed since), updates titles,
+years, episode titles and air dates, and prints what changed. Files are then renamed to match, as
+`reel move` would; `--no-move` (`-M`) only updates the database, and `--pretend` shows what would
+happen. Episodes that were "TBA" at import time are the usual beneficiaries. Fields the source
+leaves blank keep their current values, and items imported with `--asis` are left alone.
 
 Handled along the way:
 
@@ -174,6 +182,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `probe` | ffprobe invocation and interpretation |
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, stats |
+| `sync` | Refreshing identified items from their metadata source |
 
 ## Potential future work
 
