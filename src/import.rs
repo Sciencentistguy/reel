@@ -1311,7 +1311,7 @@ mod tests {
     fn collecting_a_single_file_uses_its_directory_as_the_root() {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "extras/sample.mkv", "");
-        let found = collect(&[file.clone()]).unwrap();
+        let found = collect(std::slice::from_ref(&file)).unwrap();
         let canonical = std::fs::canonicalize(&file).unwrap();
         assert_eq!(
             found,

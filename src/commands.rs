@@ -518,7 +518,7 @@ mod tests {
         move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
 
         let video = fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv");
-        assert_eq!(fixture.paths(), [video.clone()]);
+        assert_eq!(fixture.paths(), std::slice::from_ref(&video));
         assert!(video.exists());
         assert!(video.with_extension("en.srt").exists());
         assert!(!fixture.movies("messy/heat.mkv").exists());
@@ -553,7 +553,7 @@ mod tests {
             None,
         );
         move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
-        assert_eq!(fixture.paths(), [item.path.clone()]);
+        assert_eq!(fixture.paths(), std::slice::from_ref(&item.path));
         assert!(item.path.exists());
     }
 

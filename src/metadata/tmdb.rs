@@ -13,6 +13,7 @@ use crate::config::MetadataConfig;
 const BASE: &str = "https://api.themoviedb.org/3";
 
 pub struct Tmdb {
+    base: String,
     agent: ureq::Agent,
     key: String,
     language: String,
@@ -92,6 +93,10 @@ impl From<Show> for Candidate {
 
 impl Tmdb {
     pub fn new(config: &MetadataConfig) -> Result<Self> {
+        Self::with_base(config, BASE)
+    }
+
+    fn with_base(config: &MetadataConfig, base: &str) -> Result<Self> {
         if config.tmdb_api_key.is_empty() {
             bail!(
                 "no TMDB API key configured: set metadata.tmdb_api_key or TMDB_API_KEY \
@@ -99,6 +104,7 @@ impl Tmdb {
             );
         }
         Ok(Tmdb {
+            base: base.to_string(),
             agent: agent(),
             key: config.tmdb_api_key.clone(),
             language: config.tmdb_language.clone(),
@@ -108,7 +114,7 @@ impl Tmdb {
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
         let mut request = self
             .agent
-            .get(format!("{BASE}{path}"))
+            .get(format!("{}{path}", self.base))
             .query("language", &self.language);
         // v4 read access tokens are JWTs sent as bearer tokens; v3 keys go in the query string.
         request = if self.key.len() > 40 {
@@ -188,5 +194,285 @@ impl ShowSource for Tmdb {
             episodes.extend(self.season(id, summary.season_number)?);
         }
         Ok(episodes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::testserver::{Request, Server};
+
+    fn client(server: &Server, key: &str) -> Tmdb {
+        let config = MetadataConfig {
+            tmdb_api_key: key.into(),
+            ..MetadataConfig::default()
+        };
+        Tmdb::with_base(&config, &server.base).unwrap()
+    }
+
+    fn ok(body: &str) -> (u16, String) {
+        (200, body.to_string())
+    }
+
+    const MOVIES: &str = r#"{"results": [
+        {"id": 78, "title": "Blade Runner", "original_title": "Blade Runner",
+         "overview": "", "release_date": "1982-06-25"},
+        {"id": 1, "title": "The Film", "original_title": "Der Film",
+         "overview": "A plot.", "release_date": ""},
+        {"id": 2, "title": "Bare"}
+    ]}"#;
+
+    #[test]
+    fn a_key_is_required() {
+        let error = Tmdb::new(&MetadataConfig::default()).err().unwrap();
+        assert!(error.to_string().contains("no TMDB API key"));
+    }
+
+    #[test]
+    fn movie_searches_become_candidates() {
+        let server = Server::start(|_| ok(MOVIES));
+        let found = client(&server, "key")
+            .search_movies("Blade Runner", Some(1982))
+            .unwrap();
+
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            found[0],
+            Candidate {
+                source: "tmdb",
+                id: "78".into(),
+                title: "Blade Runner".into(),
+                year: Some(1982),
+                url: "https://www.themoviedb.org/movie/78".into(),
+                original_title: None,
+                overview: None,
+            }
+        );
+        assert_eq!(found[1].year, None);
+        assert_eq!(found[1].original_title.as_deref(), Some("Der Film"));
+        assert_eq!(found[1].overview.as_deref(), Some("A plot."));
+        assert_eq!(found[2].title, "Bare");
+    }
+
+    #[test]
+    fn searches_send_the_title_year_and_language() {
+        let server = Server::start(|_| ok(MOVIES));
+        client(&server, "key")
+            .search_movies("Blade Runner & Co", Some(1982))
+            .unwrap();
+        let request = &server.requests()[0];
+        assert_eq!(request.path(), "/search/movie");
+        assert_eq!(request.param("query").unwrap(), "Blade Runner & Co");
+        assert_eq!(request.param("year").unwrap(), "1982");
+        assert_eq!(request.param("language").unwrap(), "en-US");
+    }
+
+    #[test]
+    fn show_searches_use_the_first_air_date_year() {
+        let server = Server::start(|_| ok(r#"{"results": []}"#));
+        client(&server, "key")
+            .search_shows("Doctor Who", Some(2005))
+            .unwrap();
+        let request = &server.requests()[0];
+        assert_eq!(request.path(), "/search/tv");
+        assert_eq!(request.param("first_air_date_year").unwrap(), "2005");
+    }
+
+    #[test]
+    fn an_empty_dated_search_is_retried_without_the_year() {
+        let server = Server::start(|request: &Request| {
+            if request.param("year").is_some() {
+                ok(r#"{"results": []}"#)
+            } else {
+                ok(MOVIES)
+            }
+        });
+        let found = client(&server, "key")
+            .search_movies("Blade Runner", Some(1990))
+            .unwrap();
+        assert_eq!(found.len(), 3);
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].param("year").is_some());
+        assert!(requests[1].param("year").is_none());
+    }
+
+    #[test]
+    fn searches_that_find_something_are_not_repeated() {
+        let server = Server::start(|_| ok(MOVIES));
+        client(&server, "key")
+            .search_movies("Blade Runner", Some(1982))
+            .unwrap();
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn undated_searches_are_not_repeated() {
+        let server = Server::start(|_| ok(r#"{"results": []}"#));
+        let found = client(&server, "key")
+            .search_movies("Nothing", None)
+            .unwrap();
+        assert!(found.is_empty());
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn v3_keys_travel_in_the_query_string() {
+        let server = Server::start(|_| ok(MOVIES));
+        client(&server, "short-v3-key")
+            .search_movies("x", None)
+            .unwrap();
+        let request = &server.requests()[0];
+        assert_eq!(request.param("api_key").unwrap(), "short-v3-key");
+        assert!(request.header("authorization").is_none());
+    }
+
+    #[test]
+    fn v4_tokens_travel_as_bearer_credentials() {
+        let token = "e".repeat(60);
+        let server = Server::start(|_| ok(MOVIES));
+        client(&server, &token).search_movies("x", None).unwrap();
+        let request = &server.requests()[0];
+        assert_eq!(
+            request.header("authorization").unwrap(),
+            format!("Bearer {token}")
+        );
+        assert!(request.param("api_key").is_none());
+    }
+
+    #[test]
+    fn the_configured_language_is_requested() {
+        let server = Server::start(|_| ok(MOVIES));
+        let config = MetadataConfig {
+            tmdb_api_key: "key".into(),
+            tmdb_language: "fr-FR".into(),
+            ..MetadataConfig::default()
+        };
+        Tmdb::with_base(&config, &server.base)
+            .unwrap()
+            .search_movies("x", None)
+            .unwrap();
+        assert_eq!(server.requests()[0].param("language").unwrap(), "fr-FR");
+    }
+
+    #[test]
+    fn lookups_by_id_fetch_one_record() {
+        let server = Server::start(|request: &Request| match request.path() {
+            "/movie/78" => {
+                ok(r#"{"id": 78, "title": "Blade Runner", "release_date": "1982-06-25"}"#)
+            }
+            "/tv/1396" => ok(
+                r#"{"id": 1396, "name": "Breaking Bad", "original_name": "Breaking Bad",
+                    "first_air_date": "2008-01-20", "overview": "Chemistry."}"#,
+            ),
+            _ => (404, "{}".into()),
+        });
+        let tmdb = client(&server, "key");
+
+        let film = tmdb.movie("78").unwrap();
+        assert_eq!(
+            (film.title.as_str(), film.year),
+            ("Blade Runner", Some(1982))
+        );
+
+        let show = tmdb.show("1396").unwrap();
+        assert_eq!(show.url, "https://www.themoviedb.org/tv/1396");
+        assert_eq!(show.year, Some(2008));
+        assert_eq!(show.overview.as_deref(), Some("Chemistry."));
+        assert_eq!(show.original_title, None);
+        assert_eq!(tmdb.name(), "tmdb");
+    }
+
+    #[test]
+    fn http_errors_are_explained() {
+        for (status, expected) in [
+            (401, "rejected the API key"),
+            (404, "not found"),
+            (500, "request failed"),
+        ] {
+            let server = Server::start(move |_| (status, "{}".into()));
+            let error = client(&server, "key").movie("1").unwrap_err();
+            assert!(error.to_string().contains(expected), "{status}: {error}");
+        }
+    }
+
+    #[test]
+    fn malformed_responses_are_reported() {
+        let server = Server::start(|_| ok("this is not json"));
+        let error = client(&server, "key").movie("1").unwrap_err();
+        assert!(error.to_string().contains("unexpected response from TMDB"));
+    }
+
+    fn series_server() -> Server {
+        Server::start(|request: &Request| match request.path() {
+            "/tv/1" => ok(r#"{"id": 1, "name": "Show",
+                "seasons": [{"season_number": 0}, {"season_number": 1}]}"#),
+            "/tv/1/season/0" => ok(r#"{"episodes": [
+                {"season_number": 0, "episode_number": 1, "name": "Special",
+                 "air_date": "2009-01-01"}]}"#),
+            "/tv/1/season/1" => ok(r#"{"episodes": [
+                {"season_number": 1, "episode_number": 1, "name": "", "air_date": null},
+                {"season_number": 1, "episode_number": 2, "name": "Two", "air_date": ""}]}"#),
+            "/tv/2" => ok(r#"{"id": 2, "name": "Bare"}"#),
+            _ => (404, "{}".into()),
+        })
+    }
+
+    #[test]
+    fn all_episodes_are_gathered_season_by_season() {
+        let server = series_server();
+        let episodes = client(&server, "key").episodes("1", None).unwrap();
+        assert_eq!(
+            server.paths(),
+            ["/tv/1", "/tv/1/season/0", "/tv/1/season/1"]
+        );
+        assert_eq!(
+            episodes,
+            [
+                EpisodeInfo {
+                    season: 0,
+                    number: 1,
+                    title: Some("Special".into()),
+                    air_date: Some("2009-01-01".into()),
+                },
+                EpisodeInfo {
+                    season: 1,
+                    number: 1,
+                    title: None,
+                    air_date: None,
+                },
+                EpisodeInfo {
+                    season: 1,
+                    number: 2,
+                    title: Some("Two".into()),
+                    air_date: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn one_season_needs_one_request() {
+        let server = series_server();
+        let episodes = client(&server, "key").episodes("1", Some(1)).unwrap();
+        assert_eq!(server.paths(), ["/tv/1/season/1"]);
+        assert_eq!(episodes.len(), 2);
+    }
+
+    #[test]
+    fn a_show_without_seasons_has_no_episodes() {
+        let server = series_server();
+        assert!(
+            client(&server, "key")
+                .episodes("2", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_failing_season_fails_the_whole_listing() {
+        let server = series_server();
+        assert!(client(&server, "key").episodes("1", Some(9)).is_err());
     }
 }

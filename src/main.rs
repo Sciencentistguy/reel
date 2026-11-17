@@ -185,3 +185,162 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::model::Kind;
+    use clap::CommandFactory;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        Cli::try_parse_from(std::iter::once("reel").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn the_command_line_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn subcommand_aliases_work() {
+        assert!(matches!(
+            parse(&["ls"]).unwrap().command,
+            Command::List { .. }
+        ));
+        assert!(matches!(
+            parse(&["mv"]).unwrap().command,
+            Command::Move { .. }
+        ));
+        assert!(matches!(
+            parse(&["rm", "heat"]).unwrap().command,
+            Command::Remove { .. }
+        ));
+    }
+
+    #[test]
+    fn dry_run_is_an_alias_for_pretend() {
+        for args in [
+            ["import", "--dry-run", "x"],
+            ["import", "--pretend", "x"],
+            ["import", "-n", "x"],
+        ] {
+            match parse(&args).unwrap().command {
+                Command::Import(options) => assert!(options.pretend, "{args:?}"),
+                _ => panic!("expected import"),
+            }
+        }
+        for command in ["move", "update", "rescan"] {
+            assert!(parse(&[command, "--dry-run"]).is_ok(), "{command}");
+        }
+    }
+
+    #[test]
+    fn kinds_accept_tv_as_an_alias() {
+        for (name, kind) in [
+            ("movie", Kind::Movie),
+            ("episode", Kind::Episode),
+            ("tv", Kind::Episode),
+        ] {
+            match parse(&["import", "--kind", name, "x"]).unwrap().command {
+                Command::Import(options) => assert_eq!(options.kind, Some(kind)),
+                _ => panic!("expected import"),
+            }
+        }
+        assert!(parse(&["import", "--kind", "film", "x"]).is_err());
+    }
+
+    #[test]
+    fn required_arguments_are_enforced() {
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["import"]).is_err());
+        assert!(parse(&["info"]).is_err());
+        assert!(parse(&["remove"]).is_err());
+        assert!(parse(&["list"]).is_ok());
+        assert!(parse(&["stats"]).is_ok());
+        assert!(parse(&["rescan"]).is_ok());
+    }
+
+    #[test]
+    fn contradictory_options_are_rejected() {
+        assert!(parse(&["import", "--timid", "--no-timid", "x"]).is_err());
+        assert!(parse(&["rescan", "--timid", "--no-timid"]).is_err());
+        assert!(parse(&["list", "--format", "$title", "--path"]).is_err());
+        assert!(parse(&["config", "--init", "--path"]).is_err());
+        assert!(parse(&["import", "--operation", "teleport", "x"]).is_err());
+    }
+
+    #[test]
+    fn the_config_option_is_accepted_anywhere() {
+        let before = parse(&["-c", "a.toml", "stats"]).unwrap();
+        let after = parse(&["stats", "-c", "a.toml"]).unwrap();
+        assert_eq!(before.config, Some(PathBuf::from("a.toml")));
+        assert_eq!(after.config, before.config);
+    }
+
+    #[test]
+    fn queries_are_collected_as_separate_terms() {
+        match parse(&["list", "kind:movie", "^hdr:dv", "heat"])
+            .unwrap()
+            .command
+        {
+            Command::List { query, .. } => assert_eq!(query, ["kind:movie", "^hdr:dv", "heat"]),
+            _ => panic!("expected list"),
+        }
+    }
+
+    /// Runs the real commands through `run`, as the binary does, against a throwaway library.
+    #[test]
+    fn commands_work_together_through_the_command_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[library]\ndatabase = \"library.db\"\nmovies = \"Movies\"\ntv = \"TV\"\n\
+             [import]\nprobe = false\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("in")).unwrap();
+        std::fs::write(dir.path().join("in/Heat.1995.1080p.mkv"), "video").unwrap();
+
+        let reel = |args: &[&str]| {
+            let config = config.to_str().unwrap();
+            let mut full = vec!["-c", config];
+            full.extend_from_slice(args);
+            run(parse(&full).unwrap())
+        };
+        let count = |terms: &[&str]| {
+            let library = Library::open(&dir.path().join("library.db")).unwrap();
+            library.query(&Query::parse(terms).unwrap()).unwrap().len()
+        };
+        let input = dir.path().join("in");
+        let input = input.to_str().unwrap();
+
+        reel(&["import", "--asis", "--quiet", input]).unwrap();
+        assert!(
+            dir.path()
+                .join("Movies/Heat (1995)/Heat (1995).mkv")
+                .exists()
+        );
+        assert_eq!(count(&[]), 1);
+
+        reel(&["list"]).unwrap();
+        reel(&["list", "--path", "heat"]).unwrap();
+        reel(&["info", "heat"]).unwrap();
+        reel(&["stats"]).unwrap();
+        reel(&["fields"]).unwrap();
+        reel(&["config"]).unwrap();
+        reel(&["move", "--pretend"]).unwrap();
+        reel(&["update", "--yes"]).unwrap();
+        assert_eq!(count(&[]), 1);
+
+        reel(&["remove", "--yes", "--delete", "heat"]).unwrap();
+        assert_eq!(count(&[]), 0);
+        assert!(!dir.path().join("Movies/Heat (1995)").exists());
+
+        assert!(
+            reel(&["list", "year:abc"]).is_err(),
+            "bad queries are reported"
+        );
+    }
+}

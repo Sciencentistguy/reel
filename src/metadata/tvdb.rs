@@ -15,6 +15,7 @@ use crate::config::MetadataConfig;
 const BASE: &str = "https://api4.thetvdb.com/v4";
 
 pub struct Tvdb {
+    base: String,
     agent: ureq::Agent,
     key: String,
     language: String,
@@ -87,6 +88,10 @@ fn series_url(id: &str) -> String {
 
 impl Tvdb {
     pub fn new(config: &MetadataConfig) -> Result<Self> {
+        Self::with_base(config, BASE)
+    }
+
+    fn with_base(config: &MetadataConfig, base: &str) -> Result<Self> {
         if config.tvdb_api_key.is_empty() {
             bail!(
                 "no TVDB API key configured: set metadata.tvdb_api_key or TVDB_API_KEY \
@@ -95,6 +100,7 @@ impl Tvdb {
             );
         }
         Ok(Tvdb {
+            base: base.to_string(),
             agent: agent(),
             key: config.tvdb_api_key.clone(),
             language: config.tvdb_language.clone(),
@@ -108,7 +114,7 @@ impl Tvdb {
         }
         let response = self
             .agent
-            .post(format!("{BASE}/login"))
+            .post(format!("{}/login", self.base))
             .send_json(serde_json::json!({ "apikey": self.key }));
         let login: Envelope<Login> = read_json("TVDB", response)?;
         *self.token.borrow_mut() = Some(login.data.token.clone());
@@ -122,7 +128,7 @@ impl Tvdb {
     ) -> Result<Envelope<T>> {
         let mut request = self
             .agent
-            .get(format!("{BASE}{path}"))
+            .get(format!("{}{path}", self.base))
             .header("Authorization", format!("Bearer {}", self.token()?));
         for (name, value) in query {
             request = request.query(*name, value);
@@ -222,5 +228,282 @@ impl ShowSource for Tvdb {
             }
         }
         Ok(episodes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::testserver::{Request, Server};
+
+    fn client(server: &Server) -> Tvdb {
+        let config = MetadataConfig {
+            tvdb_api_key: "secret-key".into(),
+            ..MetadataConfig::default()
+        };
+        Tvdb::with_base(&config, &server.base).unwrap()
+    }
+
+    fn ok(body: &str) -> (u16, String) {
+        (200, body.to_string())
+    }
+
+    fn login() -> (u16, String) {
+        ok(r#"{"data": {"token": "tok"}}"#)
+    }
+
+    const SEARCH: &str = r#"{"data": [
+        {"tvdb_id": "78804", "name": "Doctor Who", "year": "2005",
+         "first_air_time": "2005-03-26", "overview": "Original overview",
+         "translations": {"eng": "Doctor Who (English)", "fra": "Le Docteur"},
+         "overviews": {"eng": "English overview"}},
+        {"tvdb_id": "2", "name": "Plain Show", "first_air_time": "1999-09-09",
+         "overview": "Plain overview"},
+        {"tvdb_id": "3", "name": "Blank", "translations": {"eng": ""},
+         "overviews": {"eng": ""}, "overview": "Fallback"}
+    ]}"#;
+
+    fn search_server() -> Server {
+        Server::start(|request: &Request| match request.path() {
+            "/login" => login(),
+            "/search" => ok(SEARCH),
+            _ => (404, "{}".into()),
+        })
+    }
+
+    #[test]
+    fn a_key_is_required() {
+        let error = Tvdb::new(&MetadataConfig::default()).err().unwrap();
+        assert!(error.to_string().contains("no TVDB API key"));
+    }
+
+    #[test]
+    fn searches_log_in_once_and_reuse_the_token() {
+        let server = search_server();
+        let tvdb = client(&server);
+        tvdb.search_shows("Doctor Who", None).unwrap();
+        tvdb.search_shows("Plain Show", None).unwrap();
+
+        let requests = server.requests();
+        let logins: Vec<_> = requests.iter().filter(|r| r.path() == "/login").collect();
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0].method, "POST");
+        assert!(logins[0].body.contains("secret-key"));
+        for search in requests.iter().filter(|r| r.path() == "/search") {
+            assert_eq!(search.header("authorization").unwrap(), "Bearer tok");
+        }
+        assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn a_rejected_key_is_reported() {
+        let server = Server::start(|_| (401, "{}".into()));
+        let error = client(&server).search_shows("x", None).unwrap_err();
+        assert!(error.to_string().contains("rejected the API key"));
+    }
+
+    #[test]
+    fn search_results_prefer_the_configured_language() {
+        let server = search_server();
+        let found = client(&server).search_shows("Doctor Who", None).unwrap();
+        assert_eq!(found.len(), 3);
+
+        assert_eq!(
+            found[0],
+            Candidate {
+                source: "tvdb",
+                id: "78804".into(),
+                title: "Doctor Who (English)".into(),
+                year: Some(2005),
+                url: "https://thetvdb.com/?tab=series&id=78804".into(),
+                original_title: Some("Doctor Who".into()),
+                overview: Some("English overview".into()),
+            }
+        );
+        assert_eq!(found[1].title, "Plain Show");
+        assert_eq!(found[1].year, Some(1999), "from the first air time");
+        assert_eq!(found[1].original_title, None);
+        assert_eq!(found[1].overview.as_deref(), Some("Plain overview"));
+        assert_eq!(found[2].title, "Blank", "an empty translation is ignored");
+        assert_eq!(found[2].overview.as_deref(), Some("Fallback"));
+    }
+
+    #[test]
+    fn search_asks_for_series_with_the_year() {
+        let server = search_server();
+        client(&server)
+            .search_shows("Doctor Who", Some(2005))
+            .unwrap();
+        let search = &server.requests()[1];
+        assert_eq!(search.param("query").unwrap(), "Doctor Who");
+        assert_eq!(search.param("type").unwrap(), "series");
+        assert_eq!(search.param("year").unwrap(), "2005");
+    }
+
+    #[test]
+    fn an_empty_dated_search_is_retried_without_the_year() {
+        let server = Server::start(|request: &Request| match request.path() {
+            "/login" => login(),
+            _ if request.param("year").is_some() => ok(r#"{"data": []}"#),
+            _ => ok(SEARCH),
+        });
+        let found = client(&server)
+            .search_shows("Doctor Who", Some(1990))
+            .unwrap();
+        assert_eq!(found.len(), 3);
+
+        let searches: Vec<_> = server
+            .requests()
+            .into_iter()
+            .filter(|r| r.path() == "/search")
+            .collect();
+        assert_eq!(searches.len(), 2);
+        assert!(searches[1].param("year").is_none());
+        assert_eq!(searches[1].param("type").unwrap(), "series");
+    }
+
+    fn show_server(translation: (u16, &'static str)) -> Server {
+        Server::start(move |request: &Request| match request.path() {
+            "/login" => login(),
+            "/series/1" => ok(
+                r#"{"data": {"id": 1, "name": "Original Name", "year": "2005",
+                "overview": "Original overview"}}"#,
+            ),
+            "/series/1/translations/eng" => (translation.0, translation.1.to_string()),
+            _ => (404, "{}".into()),
+        })
+    }
+
+    #[test]
+    fn a_show_takes_its_translated_name_and_overview() {
+        let server = show_server((
+            200,
+            r#"{"data": {"name": "Translated Name", "overview": "Translated overview"}}"#,
+        ));
+        let show = client(&server).show("1").unwrap();
+        assert_eq!(show.title, "Translated Name");
+        assert_eq!(show.original_title.as_deref(), Some("Original Name"));
+        assert_eq!(show.overview.as_deref(), Some("Translated overview"));
+        assert_eq!(show.year, Some(2005));
+        assert_eq!(show.url, "https://thetvdb.com/?tab=series&id=1");
+        assert_eq!(client(&server).name(), "tvdb");
+    }
+
+    #[test]
+    fn a_show_without_a_translation_keeps_its_original_details() {
+        let server = show_server((404, "{}"));
+        let show = client(&server).show("1").unwrap();
+        assert_eq!(show.title, "Original Name");
+        assert_eq!(show.original_title, None);
+        assert_eq!(show.overview.as_deref(), Some("Original overview"));
+    }
+
+    #[test]
+    fn an_unknown_show_is_an_error() {
+        let server = show_server((404, "{}"));
+        assert!(client(&server).show("999").is_err());
+    }
+
+    fn episode_server() -> Server {
+        Server::start(|request: &Request| match request.path() {
+            "/login" => login(),
+            "/series/1/episodes/default/eng" => match request.param("page").as_deref() {
+                Some("0") => ok(r#"{"data": {"episodes": [
+                        {"seasonNumber": 1, "number": 1, "name": "One", "aired": "2005-01-01"},
+                        {"seasonNumber": 1, "number": null, "name": "Unnumbered"},
+                        {"number": 9, "name": "Seasonless"}]},
+                    "links": {"next": "https://example.invalid/?page=1"}}"#),
+                Some("1") => ok(r#"{"data": {"episodes": [
+                        {"seasonNumber": 1, "number": 2, "name": "", "aired": ""}]},
+                    "links": {"next": null}}"#),
+                _ => ok(r#"{"data": {"episodes": []}}"#),
+            },
+            "/series/2/episodes/default/eng" => ok(
+                r#"{"data": {"episodes": []}, "links": {"next": "https://example.invalid/?page=1"}}"#,
+            ),
+            "/series/3/episodes/default/eng" => {
+                ok(r#"{"data": {"episodes": [{"seasonNumber": 1, "number": 1}]}}"#)
+            }
+            _ => (404, "{}".into()),
+        })
+    }
+
+    #[test]
+    fn episodes_follow_pagination_and_skip_unplaceable_entries() {
+        let server = episode_server();
+        let episodes = client(&server).episodes("1", None).unwrap();
+        assert_eq!(
+            episodes,
+            [
+                EpisodeInfo {
+                    season: 1,
+                    number: 1,
+                    title: Some("One".into()),
+                    air_date: Some("2005-01-01".into()),
+                },
+                EpisodeInfo {
+                    season: 1,
+                    number: 2,
+                    title: None,
+                    air_date: None,
+                },
+            ]
+        );
+        let pages: Vec<_> = server
+            .requests()
+            .iter()
+            .filter(|r| r.path().starts_with("/series"))
+            .map(|r| r.param("page").unwrap())
+            .collect();
+        assert_eq!(pages, ["0", "1"]);
+    }
+
+    #[test]
+    fn a_season_filter_is_sent_with_every_page() {
+        let server = episode_server();
+        client(&server).episodes("1", Some(2)).unwrap();
+        let requests = server.requests();
+        let pages: Vec<_> = requests
+            .iter()
+            .filter(|r| r.path().starts_with("/series"))
+            .collect();
+        assert_eq!(pages.len(), 2);
+        assert!(pages.iter().all(|r| r.param("season").unwrap() == "2"));
+    }
+
+    #[test]
+    fn no_season_filter_is_sent_by_default() {
+        let server = episode_server();
+        client(&server).episodes("1", None).unwrap();
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| request.param("season").is_none())
+        );
+    }
+
+    #[test]
+    fn an_empty_page_ends_pagination_even_if_more_is_promised() {
+        let server = episode_server();
+        assert!(client(&server).episodes("2", None).unwrap().is_empty());
+        let pages = server
+            .requests()
+            .iter()
+            .filter(|r| r.path().starts_with("/series"))
+            .count();
+        assert_eq!(pages, 1);
+    }
+
+    #[test]
+    fn a_missing_next_link_ends_pagination() {
+        let server = episode_server();
+        assert_eq!(client(&server).episodes("3", None).unwrap().len(), 1);
+        let pages = server
+            .requests()
+            .iter()
+            .filter(|r| r.path().starts_with("/series"))
+            .count();
+        assert_eq!(pages, 1);
     }
 }
