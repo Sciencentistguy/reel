@@ -56,6 +56,12 @@ pub struct Options {
     /// Skip metadata lookups and name files from what their current names say.
     #[arg(short = 'A', long)]
     pub asis: bool,
+    /// Always ask which match to use, even when one is certain (overrides the configuration).
+    #[arg(long, conflicts_with = "no_timid")]
+    pub timid: bool,
+    /// Auto-select confident matches even if the configuration says to be timid.
+    #[arg(long)]
+    pub no_timid: bool,
 }
 
 struct Pending {
@@ -256,12 +262,15 @@ fn decide(
     library: &Library,
     threshold: f64,
     interactive: bool,
+    timid: bool,
     edition: &mut Option<Option<String>>,
 ) -> Result<Decision> {
+    let mut named_by_id = None;
     if let Some((source, id)) = &group.id_hint
         && source == lookup.source()
     {
         match lookup.by_id(id) {
+            Ok(candidate) if timid => named_by_id = Some(candidate),
             Ok(candidate) => {
                 println!(
                     "  Matched by ID: {} [{source}-{id}]",
@@ -276,8 +285,12 @@ fn decide(
     let (mut title, mut year) = (group.title.clone(), group.year);
     let mut searched_manually = false;
     loop {
-        let ranked = metadata::rank(&title, year, lookup.search(&title, year)?);
-        if !searched_manually && metadata::is_strong(&ranked, threshold) {
+        let mut ranked = metadata::rank(&title, year, lookup.search(&title, year)?);
+        if let Some(named) = named_by_id.take() {
+            ranked.retain(|(_, found)| (found.source, &found.id) != (named.source, &named.id));
+            ranked.insert(0, (0.0, named));
+        }
+        if !timid && !searched_manually && metadata::is_strong(&ranked, threshold) {
             let (distance, candidate) = ranked.into_iter().next().unwrap();
             println!(
                 "  Matched: {} [{}-{}] ({})",
@@ -289,7 +302,7 @@ fn decide(
             return Ok(Decision::Use(candidate));
         }
         if !interactive {
-            println!("  No confident match; skipping.");
+            println!("  Not choosing a match without asking; skipping.");
             return Ok(Decision::Skip);
         }
 
@@ -663,6 +676,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
                 importer.library,
                 config.import.strong_match,
                 interactive,
+                (config.import.timid || options.timid) && !options.no_timid,
                 &mut edition,
             )?
         };

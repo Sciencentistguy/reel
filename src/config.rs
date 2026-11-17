@@ -40,6 +40,8 @@ pub struct ImportConfig {
     pub probe: bool,
     /// Matches at or below this distance (0 = identical) are applied without asking.
     pub strong_match: f64,
+    /// Always ask which match to use, even when one is certain.
+    pub timid: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +100,7 @@ impl Default for ImportConfig {
             subtitles: true,
             probe: true,
             strong_match: 0.08,
+            timid: false,
         }
     }
 }
