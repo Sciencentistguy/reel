@@ -100,7 +100,14 @@ enum Command {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    let config_path = cli.config.unwrap_or_else(config::default_path);
+    let initialising = matches!(cli.command, Command::Config { init: true, .. });
+    let config_path = cli.config.unwrap_or_else(|| {
+        if initialising {
+            config::user_path()
+        } else {
+            config::default_path()
+        }
+    });
     let config = Config::load(&config_path)?;
     let open_library = || Library::open(&config.library.database);
 

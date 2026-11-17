@@ -124,12 +124,17 @@ impl Default for MetadataConfig {
 
 const SYSTEM_PATH: &str = "/etc/reel/config.toml";
 
-/// The user's configuration file, or the system-wide one when the user has none.
-pub fn default_path() -> PathBuf {
-    let user = dirs::config_dir()
+/// The per-user configuration file, which is the only one reel ever writes.
+pub fn user_path() -> PathBuf {
+    dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("reel")
-        .join("config.toml");
+        .join("config.toml")
+}
+
+/// The user's configuration file, or the system-wide one when the user has none.
+pub fn default_path() -> PathBuf {
+    let user = user_path();
     let system = Path::new(SYSTEM_PATH);
     if !user.exists() && system.exists() {
         system.to_path_buf()
