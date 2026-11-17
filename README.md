@@ -116,6 +116,7 @@ nix run . -- stats                        # the same, built by Nix
 | Command | Purpose |
 | --- | --- |
 | `reel import PATH...` | Identify files and file them into the library |
+| `reel rescan [PATH...]` | Add files already in the library folders but missing from the database |
 | `reel list [QUERY]` | List items (`-f` for a template, `-p` for paths) |
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
@@ -134,6 +135,12 @@ search again, enter an ID, use the names as they are, set the edition for every 
 group (overriding any `{edition-…}` in the names), or skip. `--quiet` never prompts and skips
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
 names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.
+
+`reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
+paths given), identifies files the database doesn't know about exactly as `import` does, and
+records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
+names in line with the naming scheme. It accepts the same `--quiet`, `--timid`, `--no-timid`,
+`--asis` and `--pretend` flags, and never removes rows (that's `reel update`).
 
 Handled along the way:
 

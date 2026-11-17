@@ -37,6 +37,8 @@ struct Cli {
 enum Command {
     /// Identify video files and file them into the library.
     Import(import::Options),
+    /// Add files already in the library folders but missing from the database.
+    Rescan(import::Rescan),
     /// List library items matching a query.
     #[command(visible_alias = "ls")]
     List {
@@ -113,6 +115,7 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Command::Import(options) => import::run(&config, &mut open_library()?, &options),
+        Command::Rescan(options) => import::rescan(&config, &mut open_library()?, options),
         Command::List {
             format,
             path,

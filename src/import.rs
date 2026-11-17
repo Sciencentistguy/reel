@@ -64,6 +64,28 @@ pub struct Options {
     pub no_timid: bool,
 }
 
+/// Options for `reel rescan`, which adopts files already in the library folders.
+#[derive(clap::Args)]
+pub struct Rescan {
+    /// Directories to scan instead of the library's film and TV folders.
+    pub paths: Vec<PathBuf>,
+    /// Never prompt; skip anything without a confident match.
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// Show what would happen without touching the database.
+    #[arg(short = 'n', long, visible_alias = "dry-run")]
+    pub pretend: bool,
+    /// Skip metadata lookups and take titles from the current names.
+    #[arg(short = 'A', long)]
+    pub asis: bool,
+    /// Always ask which match to use, even when one is certain (overrides the configuration).
+    #[arg(long, conflicts_with = "no_timid")]
+    pub timid: bool,
+    /// Auto-select confident matches even if the configuration says to be timid.
+    #[arg(long)]
+    pub no_timid: bool,
+}
+
 struct Pending {
     path: PathBuf,
     /// The directory given on the command line, which bounds empty-directory pruning.
@@ -536,6 +558,8 @@ struct Importer<'a> {
     operation: Operation,
     pretend: bool,
     probe: bool,
+    /// Record files where they are instead of moving them to their proper names.
+    adopt: bool,
     /// What a pretend run would have added, so later files still see earlier ones as versions.
     planned: Vec<Item>,
     /// Destinations already assigned this run, which a pretend run has not yet created.
@@ -580,10 +604,13 @@ impl Importer<'_> {
         let has_versions = self.library.has_other_versions(&item)?
             || self.planned.iter().any(|planned| planned.same_work(&item));
         let claimed = &self.claimed;
-        let destination =
+        let destination = if self.adopt {
+            file.path.clone()
+        } else {
             naming::free_destination(self.config, &item, has_versions, &file.path, |path| {
                 claimed.contains(path) || path.symlink_metadata().is_ok()
-            });
+            })
+        };
         let in_place = destination == file.path;
         if !in_place
             && (self.claimed.contains(&destination) || destination.symlink_metadata().is_ok())
@@ -597,7 +624,9 @@ impl Importer<'_> {
         }
 
         let name = file.path.file_name().unwrap_or_default().to_string_lossy();
-        if in_place {
+        if self.adopt {
+            println!("  {name}");
+        } else if in_place {
             println!("  {name} (already in place)");
         } else {
             println!("  {name}\n    -> {}", destination.display());
@@ -628,7 +657,7 @@ impl Importer<'_> {
                 fileops::prune_empty_dirs(parent, &file.root);
             }
         }
-        item.original_path = Some(file.path.clone());
+        item.original_path = (!self.adopt).then(|| file.path.clone());
         item.path = destination;
         item.added = now();
         self.library.save(&mut item)?;
@@ -637,6 +666,42 @@ impl Importer<'_> {
 }
 
 pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<()> {
+    run_with(config, library, options, false)
+}
+
+/// Adds files that are in the library folders but missing from the database, leaving them where
+/// they are; `reel move` can rename them afterwards.
+pub fn rescan(config: &Config, library: &mut Library, rescan: Rescan) -> Result<()> {
+    let paths = if rescan.paths.is_empty() {
+        let roots: Vec<_> = [&config.library.movies, &config.library.tv]
+            .into_iter()
+            .filter(|root| root.is_dir())
+            .cloned()
+            .collect();
+        anyhow::ensure!(
+            !roots.is_empty(),
+            "neither {} nor {} exists",
+            config.library.movies.display(),
+            config.library.tv.display()
+        );
+        roots
+    } else {
+        rescan.paths
+    };
+    let options = Options {
+        paths,
+        operation: None,
+        quiet: rescan.quiet,
+        pretend: rescan.pretend,
+        kind: None,
+        asis: rescan.asis,
+        timid: rescan.timid,
+        no_timid: rescan.no_timid,
+    };
+    run_with(config, library, &options, true)
+}
+
+fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bool) -> Result<()> {
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
@@ -682,6 +747,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
         operation: options.operation.unwrap_or(config.import.operation),
         pretend: options.pretend,
         probe: config.import.probe,
+        adopt,
         planned: Vec::new(),
         claimed: HashSet::new(),
         versioned: false,
@@ -771,10 +837,11 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
     }
 
     let Summary { imported, skipped } = importer.summary;
-    let verb = if options.pretend {
-        "Would import"
-    } else {
-        "Imported"
+    let verb = match (adopt, options.pretend) {
+        (false, true) => "Would import",
+        (false, false) => "Imported",
+        (true, true) => "Would add",
+        (true, false) => "Added",
     };
     println!("\n{verb} {imported} file(s); skipped {skipped}.");
     if importer.versioned {
