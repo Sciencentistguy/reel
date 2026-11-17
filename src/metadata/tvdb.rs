@@ -173,6 +173,7 @@ impl ShowSource for Tvdb {
                         .year
                         .and_then(|year| year.parse().ok())
                         .or_else(|| year_of(result.first_air_time.as_deref())),
+                    runtime: None,
                 }
             })
             .collect())
@@ -202,6 +203,7 @@ impl ShowSource for Tvdb {
                 .year
                 .and_then(|year| year.parse().ok())
                 .or_else(|| year_of(series.first_aired.as_deref())),
+            runtime: None,
         })
     }
 
@@ -347,6 +349,7 @@ mod tests {
                 url: "https://thetvdb.com/?tab=series&id=78804".into(),
                 original_title: Some("Doctor Who".into()),
                 overview: Some("English overview".into()),
+                runtime: None,
             }
         );
         assert_eq!(found[1].title, "Plain Show");

@@ -23,6 +23,16 @@ pub struct Candidate {
     /// The title in its original language, when it differs from `title`.
     pub original_title: Option<String>,
     pub overview: Option<String>,
+    /// Running time in minutes; search results usually leave it out.
+    pub runtime: Option<u32>,
+}
+
+/// A file's running time, to compare with a candidate's.
+#[derive(Debug, Clone, Copy)]
+pub struct Length {
+    pub seconds: f64,
+    /// Whether the file is a cut other than the theatrical one, so may differ legitimately.
+    pub alternate_cut: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -208,11 +218,38 @@ pub fn distance(title: &str, year: Option<i32>, candidate: &Candidate) -> f64 {
     (title_distance + year_penalty).min(1.0)
 }
 
+/// Extra distance for a candidate whose running time disagrees with the file's. Small
+/// differences are expected from PAL speed-up, credits and rounding to the minute.
+pub fn length_penalty(length: Option<Length>, candidate: &Candidate) -> f64 {
+    let (Some(length), Some(minutes)) = (length, candidate.runtime) else {
+        return 0.0;
+    };
+    let expected = f64::from(minutes) * 60.0;
+    let penalty = match (length.seconds - expected).abs() / expected {
+        ratio if ratio <= 0.06 => 0.0,
+        ratio if ratio <= 0.12 => 0.03,
+        _ => 0.15,
+    };
+    if length.alternate_cut {
+        penalty / 3.0
+    } else {
+        penalty
+    }
+}
+
 /// Sorts candidates by distance, preserving the source's own ranking among ties.
-pub fn rank(title: &str, year: Option<i32>, candidates: Vec<Candidate>) -> Vec<(f64, Candidate)> {
+pub fn rank(
+    title: &str,
+    year: Option<i32>,
+    length: Option<Length>,
+    candidates: Vec<Candidate>,
+) -> Vec<(f64, Candidate)> {
     let mut ranked: Vec<_> = candidates
         .into_iter()
-        .map(|candidate| (distance(title, year, &candidate), candidate))
+        .map(|candidate| {
+            let score = distance(title, year, &candidate) + length_penalty(length, &candidate);
+            (score.min(1.0), candidate)
+        })
         .collect();
     ranked.sort_by(|a, b| a.0.total_cmp(&b.0));
     ranked
@@ -418,7 +455,52 @@ mod tests {
             url: String::new(),
             original_title: None,
             overview: None,
+            runtime: None,
         }
+    }
+
+    #[test]
+    fn running_times_separate_films_of_the_same_name() {
+        let mut short = candidate("Heat", 1995);
+        short.id = "short".into();
+        short.runtime = Some(90);
+        let mut long = candidate("Heat", 1995);
+        long.id = "long".into();
+        long.runtime = Some(170);
+        let length = |seconds, alternate_cut| {
+            Some(Length {
+                seconds,
+                alternate_cut,
+            })
+        };
+
+        let tied = rank("Heat", Some(1995), None, vec![short.clone(), long.clone()]);
+        assert!(!is_strong(&tied, 0.08));
+
+        let ranked = rank(
+            "Heat",
+            Some(1995),
+            length(170.0 * 60.0, false),
+            vec![short.clone(), long.clone()],
+        );
+        assert_eq!(ranked[0].1.id, "long");
+        assert!(is_strong(&ranked, 0.08));
+
+        // PAL speed-up runs about 4% short and is not penalised.
+        assert_eq!(
+            length_penalty(length(170.0 * 60.0 * 0.96, false), &long),
+            0.0
+        );
+        assert!(length_penalty(length(195.0 * 60.0, false), &long) > 0.0);
+        assert!(
+            length_penalty(length(200.0 * 60.0, true), &long)
+                < length_penalty(length(200.0 * 60.0, false), &long)
+        );
+        assert_eq!(length_penalty(None, &long), 0.0);
+        assert_eq!(
+            length_penalty(length(60.0, false), &candidate("Heat", 1995)),
+            0.0
+        );
     }
 
     #[test]
@@ -426,6 +508,7 @@ mod tests {
         let ranked = rank(
             "the matrix",
             Some(1999),
+            None,
             vec![
                 candidate("The Matrix Reloaded", 2003),
                 candidate("The Matrix", 1999),
@@ -441,12 +524,14 @@ mod tests {
         let ranked = rank(
             "Dune",
             None,
+            None,
             vec![candidate("Dune", 2021), candidate("Dune", 1984)],
         );
         assert!(!is_strong(&ranked, 0.08));
         let ranked = rank(
             "Dune",
             Some(1984),
+            None,
             vec![candidate("Dune", 2021), candidate("Dune", 1984)],
         );
         assert_eq!(ranked[0].1.year, Some(1984));
@@ -519,7 +604,7 @@ mod tests {
         first.id = "first".into();
         let mut second = candidate("Heat", 1995);
         second.id = "second".into();
-        let ranked = rank("Heat", Some(1995), vec![first, second]);
+        let ranked = rank("Heat", Some(1995), None, vec![first, second]);
         let ids: Vec<_> = ranked.iter().map(|(_, c)| c.id.as_str()).collect();
         assert_eq!(ids, ["first", "second"]);
     }

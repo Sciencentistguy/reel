@@ -28,7 +28,7 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-fn human_duration(seconds: f64) -> String {
+pub fn human_duration(seconds: f64) -> String {
     let total = seconds.round() as u64;
     let (days, hours, minutes) = (total / 86_400, total % 86_400 / 3600, total % 3600 / 60);
     match days {

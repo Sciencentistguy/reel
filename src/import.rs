@@ -9,10 +9,11 @@ use anyhow::{Context, Result};
 use rustyline::error::ReadlineError;
 use walkdir::WalkDir;
 
+use crate::commands::human_duration;
 use crate::config::{Config, Operation};
 use crate::fileops;
 use crate::library::Library;
-use crate::metadata::{self, Candidate, EpisodeInfo, MovieSource, ShowSource};
+use crate::metadata::{self, Candidate, EpisodeInfo, Length, MovieSource, ShowSource};
 use crate::model::{Item, Kind};
 use crate::naming;
 use crate::parse::{self, Parsed};
@@ -98,6 +99,8 @@ struct Group {
     title: String,
     year: Option<i32>,
     id_hint: Option<(String, String)>,
+    /// The running time of a film's only file, when known.
+    length: Option<Length>,
     files: Vec<Pending>,
 }
 
@@ -242,6 +245,7 @@ fn group(files: Vec<Pending>) -> Vec<Group> {
                 title: parsed.title.clone(),
                 year: parsed.year,
                 id_hint: parsed.id_hint.clone(),
+                length: None,
                 files: Vec::new(),
             });
             groups.len() - 1
@@ -324,6 +328,50 @@ fn colour_percent(percent: f64, colour: bool) -> String {
     format!("\x1b[{code}m{text}\x1b[0m")
 }
 
+/// How many of the best candidates have their full records fetched to learn their running times.
+const RUNTIME_LOOKUPS: usize = 3;
+
+/// The running time of a film group's file, if it is a single, whole film.
+fn measure(group: &Group) -> Result<Option<Length>> {
+    let [file] = group.files.as_slice() else {
+        return Ok(None);
+    };
+    if group.kind != Kind::Movie || file.parsed.part.is_some() {
+        return Ok(None);
+    }
+    Ok(probe::duration(&file.path)?.map(|seconds| Length {
+        seconds,
+        alternate_cut: file.parsed.edition.is_some(),
+    }))
+}
+
+/// Fills in the running times of the best candidates, which searches leave out, and re-ranks.
+fn with_runtimes(
+    lookup: &Lookup,
+    title: &str,
+    year: Option<i32>,
+    length: Option<Length>,
+    ranked: Vec<(f64, Candidate)>,
+) -> Vec<(f64, Candidate)> {
+    let candidates = ranked
+        .into_iter()
+        .enumerate()
+        .map(|(position, (_, mut candidate))| {
+            if position < RUNTIME_LOOKUPS && candidate.runtime.is_none() {
+                match lookup.by_id(&candidate.id) {
+                    Ok(full) => candidate.runtime = full.runtime,
+                    Err(err) => eprintln!(
+                        "  warning: cannot fetch the running time of {}-{}: {err:#}",
+                        candidate.source, candidate.id
+                    ),
+                }
+            }
+            candidate
+        })
+        .collect();
+    metadata::rank(title, year, length, candidates)
+}
+
 fn decide(
     group: &Group,
     lookup: &Lookup,
@@ -353,7 +401,12 @@ fn decide(
     let (mut title, mut year) = (group.title.clone(), group.year);
     let mut searched_manually = false;
     loop {
-        let mut ranked = metadata::rank(&title, year, lookup.search(&title, year)?);
+        let mut ranked = metadata::rank(&title, year, group.length, lookup.search(&title, year)?);
+        if group.length.is_some()
+            && (timid || searched_manually || !metadata::is_strong(&ranked, threshold))
+        {
+            ranked = with_runtimes(lookup, &title, year, group.length, ranked);
+        }
         if let Some(named) = named_by_id.take() {
             ranked.retain(|(_, found)| (found.source, &found.id) != (named.source, &named.id));
             ranked.insert(0, (0.0, named));
@@ -377,6 +430,8 @@ fn decide(
         let shown = &ranked[..ranked.len().min(8)];
         if shown.is_empty() {
             println!("  No candidates found for {:?}.", describe(&title, year));
+        } else if let Some(length) = group.length {
+            println!("  The file runs {}.", human_duration(length.seconds));
         }
         let in_library = shown
             .iter()
@@ -389,8 +444,11 @@ fn decide(
                 0 => String::new(),
                 count => format!(" - already in library ({count} file(s))"),
             };
+            let runtime = candidate.runtime.map_or(String::new(), |minutes| {
+                format!(", {}", human_duration(f64::from(minutes) * 60.0))
+            });
             println!(
-                "  {}. {} [{}-{}] ({}){known}",
+                "  {}. {} [{}-{}] ({}{runtime}){known}",
                 number + 1,
                 describe_candidate(candidate),
                 candidate.source,
@@ -754,7 +812,8 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
         summary: Summary::default(),
     };
 
-    for group in group(pending) {
+    let mut can_measure = config.import.probe && !options.asis;
+    for mut group in group(pending) {
         let label = match group.kind {
             Kind::Movie => "film",
             Kind::Episode => "show",
@@ -764,6 +823,13 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
             describe(&group.title, group.year),
             group.files.len()
         );
+
+        if can_measure {
+            match measure(&group) {
+                Ok(length) => group.length = length,
+                Err(err) => can_measure = err.downcast_ref::<io::Error>().is_none(),
+            }
+        }
 
         let mut edition = None;
         let decision = if options.asis {
@@ -953,6 +1019,7 @@ mod tests {
             url: String::new(),
             original_title: None,
             overview: None,
+            runtime: None,
         }
     }
 
@@ -960,6 +1027,8 @@ mod tests {
     struct StubMovies {
         results: Vec<Candidate>,
         by_id: Option<Candidate>,
+        /// Full records by ID, which take precedence over `by_id`.
+        records: Vec<Candidate>,
         fail_search: bool,
         searches: Cell<usize>,
         lookups: RefCell<Vec<String>>,
@@ -976,7 +1045,12 @@ mod tests {
 
         fn movie(&self, id: &str) -> Result<Candidate> {
             self.lookups.borrow_mut().push(id.to_string());
-            self.by_id.clone().ok_or_else(|| anyhow!("not found"))
+            self.records
+                .iter()
+                .find(|record| record.id == id)
+                .or(self.by_id.as_ref())
+                .cloned()
+                .ok_or_else(|| anyhow!("not found"))
         }
     }
 
@@ -1113,6 +1187,38 @@ mod tests {
             Decision::Use(found) => assert_eq!(found.id, "949"),
             _ => panic!("expected the 1995 film"),
         }
+    }
+
+    #[test]
+    fn running_times_settle_films_of_the_same_name() {
+        let with_runtime = |id, minutes| Candidate {
+            runtime: Some(minutes),
+            ..candidate("Heat", 1995, id)
+        };
+        let source = StubMovies {
+            results: vec![
+                candidate("Heat", 1995, "short"),
+                candidate("Heat", 1995, "long"),
+            ],
+            records: vec![with_runtime("short", 90), with_runtime("long", 170)],
+            ..StubMovies::default()
+        };
+        let mut group = group_of("/in/Heat.1995.mkv");
+        assert!(matches!(
+            decision(&group, &source, false, false).unwrap(),
+            Decision::Skip
+        ));
+        assert!(source.lookups.borrow().is_empty());
+
+        group.length = Some(Length {
+            seconds: 168.0 * 60.0,
+            alternate_cut: false,
+        });
+        match decision(&group, &source, false, false).unwrap() {
+            Decision::Use(found) => assert_eq!(found.id, "long"),
+            _ => panic!("expected the film whose running time matches"),
+        }
+        assert_eq!(*source.lookups.borrow(), ["short", "long"]);
     }
 
     #[test]

@@ -30,6 +30,8 @@ struct Movie {
     original_title: Option<String>,
     overview: Option<String>,
     release_date: Option<String>,
+    /// Only present on full records, and zero when unknown.
+    runtime: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -71,6 +73,7 @@ impl From<Movie> for Candidate {
             year: year_of(movie.release_date.as_deref()),
             original_title: distinct_from(&movie.title, movie.original_title),
             overview: non_empty(movie.overview),
+            runtime: movie.runtime.filter(|&minutes| minutes > 0),
             title: movie.title,
         }
     }
@@ -85,6 +88,7 @@ impl From<Show> for Candidate {
             year: year_of(show.first_air_date.as_deref()),
             original_title: distinct_from(&show.name, show.original_name),
             overview: non_empty(show.overview),
+            runtime: None,
             title: show.name,
         }
     }
@@ -272,6 +276,7 @@ mod tests {
                 url: "https://www.themoviedb.org/movie/78".into(),
                 original_title: None,
                 overview: None,
+                runtime: None,
             }
         );
         assert_eq!(found[1].year, None);
@@ -384,9 +389,9 @@ mod tests {
     #[test]
     fn lookups_by_id_fetch_one_record() {
         let server = Server::start(|request: &Request| match request.path() {
-            "/movie/78" => {
-                ok(r#"{"id": 78, "title": "Blade Runner", "release_date": "1982-06-25"}"#)
-            }
+            "/movie/78" => ok(
+                r#"{"id": 78, "title": "Blade Runner", "release_date": "1982-06-25", "runtime": 117}"#,
+            ),
             "/tv/1396" => ok(
                 r#"{"id": 1396, "name": "Breaking Bad", "original_name": "Breaking Bad",
                     "first_air_date": "2008-01-20", "overview": "Chemistry."}"#,
@@ -400,6 +405,7 @@ mod tests {
             (film.title.as_str(), film.year),
             ("Blade Runner", Some(1982))
         );
+        assert_eq!(film.runtime, Some(117));
 
         let show = tmdb.show("1396").unwrap();
         assert_eq!(show.url, "https://www.themoviedb.org/tv/1396");

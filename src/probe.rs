@@ -93,6 +93,11 @@ fn ffprobe(path: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+/// Just the running time in seconds, which is much cheaper than a full probe.
+pub fn duration(path: &Path) -> Result<Option<f64>> {
+    Ok(parse_streams(&ffprobe(path, &["-show_format"])?)?.duration)
+}
+
 pub fn probe(path: &Path) -> Result<MediaInfo> {
     let streams = ffprobe(path, &["-show_format", "-show_streams"])?;
     let mut info = parse_streams(&streams)?;

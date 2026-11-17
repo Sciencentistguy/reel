@@ -112,6 +112,12 @@ group (overriding any `{edition-…}` in the names), or skip. `--quiet` never pr
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
 names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.
 
+When a film is a single file and the match is uncertain, reel compares the file's running time
+(from ffprobe, unless `probe = false`) with TMDB's for the best few candidates. That separates
+remakes and films that share a name. A difference of up to 6% is ignored, which covers PAL speed-up
+and credits. The penalty is lighter for files with an edition, which may legitimately run longer or
+shorter. Running times are shown beside the candidates when you are asked to choose.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
