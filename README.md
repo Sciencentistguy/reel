@@ -107,7 +107,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 `reel import` walks the given paths, guesses a title, year and episode numbering from each file
 name (falling back to parent directories), and groups files by film or show. Each group is looked
 up once. A confident match is applied automatically; otherwise you choose from the candidates,
-search again, enter an ID, use the names as they are, set the edition for every file in a film's
+search again, enter an ID (or paste a TMDB page URL), use the names as they are, set the edition for every file in a film's
 group (overriding any `{edition-…}` in the names), or skip. `--quiet` never prompts and skips
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
 names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.

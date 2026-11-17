@@ -161,12 +161,32 @@ impl Tmdb {
     }
 }
 
+/// Accepts a bare ID, a slugged ID such as `129533-barbie`, or a TMDB page URL.
+fn entered_id(input: &str) -> &str {
+    let input = input.trim();
+    let path = input.split(['?', '#']).next().unwrap_or_default();
+    let mut segments = path.split('/');
+    let segment = if path.contains('/') {
+        segments.find(|segment| matches!(*segment, "movie" | "tv"));
+        segments.next().unwrap_or(input)
+    } else {
+        path
+    };
+    let digits = segment.bytes().take_while(u8::is_ascii_digit).count();
+    if digits > 0 {
+        &segment[..digits]
+    } else {
+        segment
+    }
+}
+
 impl MovieSource for Tmdb {
     fn search_movies(&self, title: &str, year: Option<i32>) -> Result<Vec<Candidate>> {
         self.search::<Movie>("/search/movie", "year", title, year)
     }
 
     fn movie(&self, id: &str) -> Result<Candidate> {
+        let id = entered_id(id);
         Ok(self.get::<Movie>(&format!("/movie/{id}"), &[])?.into())
     }
 }
@@ -181,6 +201,7 @@ impl ShowSource for Tmdb {
     }
 
     fn show(&self, id: &str) -> Result<Candidate> {
+        let id = entered_id(id);
         Ok(self.get::<Show>(&format!("/tv/{id}"), &[])?.into())
     }
 
@@ -386,6 +407,21 @@ mod tests {
         assert_eq!(show.overview.as_deref(), Some("Chemistry."));
         assert_eq!(show.original_title, None);
         assert_eq!(tmdb.name(), "tmdb");
+    }
+
+    #[test]
+    fn entered_ids_accept_page_urls() {
+        for input in [
+            "129533",
+            " 129533 ",
+            "129533-barbie-the-princess-the-popstar",
+            "https://www.themoviedb.org/movie/129533-barbie-the-princess-the-popstar",
+            "https://www.themoviedb.org/movie/129533?language=en-GB",
+            "https://www.themoviedb.org/tv/129533-slug/season/1",
+            "themoviedb.org/movie/129533",
+        ] {
+            assert_eq!(entered_id(input), "129533", "{input}");
+        }
     }
 
     #[test]
