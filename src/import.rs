@@ -1,11 +1,12 @@
 //! The import pipeline: discover files, identify them, then file them into the library.
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use rustyline::error::ReadlineError;
 use walkdir::WalkDir;
 
 use crate::config::{Config, Operation};
@@ -130,15 +131,15 @@ pub fn file_stamp(path: &Path) -> Result<(u64, i64)> {
     Ok((metadata.len(), mtime))
 }
 
+/// Reads a line with editing keys (arrows, history within the line, Ctrl-A/E, ...). Returns `None`
+/// at end of input or on Ctrl-C.
 pub fn prompt(text: &str) -> Result<Option<String>> {
-    print!("{text}");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    if io::stdin().lock().read_line(&mut line)? == 0 {
-        println!();
-        return Ok(None);
+    let mut editor = rustyline::DefaultEditor::new()?;
+    match editor.readline(text) {
+        Ok(line) => Ok(Some(line.trim().to_string())),
+        Err(ReadlineError::Eof | ReadlineError::Interrupted) => Ok(None),
+        Err(err) => Err(err.into()),
     }
-    Ok(Some(line.trim().to_string()))
 }
 
 fn is_video(path: &Path) -> bool {
