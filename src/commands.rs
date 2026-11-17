@@ -133,13 +133,13 @@ pub fn move_items(
     pretend: bool,
 ) -> Result<()> {
     let mut moved = 0;
+    let mut claimed = HashSet::new();
     for mut item in library.query(query)? {
-        let version = if library.has_other_versions(&item)? {
-            item.media.resolution.clone()
-        } else {
-            None
-        };
-        let destination = naming::destination(config, &item, version.as_deref());
+        let versioned = library.has_other_versions(&item)?;
+        let destination = naming::free_destination(config, &item, versioned, &item.path, |path| {
+            claimed.contains(path) || path.symlink_metadata().is_ok()
+        });
+        claimed.insert(destination.clone());
         if destination == item.path {
             continue;
         }

@@ -137,7 +137,8 @@ Handled along the way:
 - Plex `{tmdb-…}`/`{tvdb-…}` tags already present in names are used for a direct lookup.
 - Editions (`{edition-Director's Cut}`) and split films (`- pt1`).
 - Multiple versions of the same film or episode gain a resolution suffix (`- 1080p`). The copy
-  already in the library is renamed the next time `reel move` runs.
+  already in the library is renamed the next time `reel move` runs. Copies that would share a
+  name get a `copy 2`, `copy 3`, … suffix after the resolution.
 - Multi-episode files (`s02e01-e03`), specials (`Season 00`) and date-based shows.
 - Sidecar subtitles are renamed with their video, keeping suffixes such as `.en.forced.srt`.
 - Samples and Plex extras folders (`Featurettes`, `Trailers`, …) are ignored.

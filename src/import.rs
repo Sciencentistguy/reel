@@ -1,6 +1,6 @@
 //! The import pipeline: discover files, identify them, then file them into the library.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -461,6 +461,8 @@ struct Importer<'a> {
     probe: bool,
     /// What a pretend run would have added, so later files still see earlier ones as versions.
     planned: Vec<Item>,
+    /// Destinations already assigned this run, which a pretend run has not yet created.
+    claimed: HashSet<PathBuf>,
     versioned: bool,
     summary: Summary,
 }
@@ -500,14 +502,15 @@ impl Importer<'_> {
 
         let has_versions = self.library.has_other_versions(&item)?
             || self.planned.iter().any(|planned| planned.same_work(&item));
-        let version = if has_versions {
-            item.media.resolution.clone()
-        } else {
-            None
-        };
-        let destination = naming::destination(self.config, &item, version.as_deref());
+        let claimed = &self.claimed;
+        let destination =
+            naming::free_destination(self.config, &item, has_versions, &file.path, |path| {
+                claimed.contains(path) || path.symlink_metadata().is_ok()
+            });
         let in_place = destination == file.path;
-        if !in_place && destination.symlink_metadata().is_ok() {
+        if !in_place
+            && (self.claimed.contains(&destination) || destination.symlink_metadata().is_ok())
+        {
             eprintln!(
                 "  warning: {} already exists; skipping {}",
                 destination.display(),
@@ -522,7 +525,8 @@ impl Importer<'_> {
         } else {
             println!("  {name}\n    -> {}", destination.display());
         }
-        self.versioned |= version.is_some();
+        self.versioned |= has_versions;
+        self.claimed.insert(destination.clone());
         if self.pretend {
             self.planned.push(item);
             return Ok(true);
@@ -602,6 +606,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
         pretend: options.pretend,
         probe: config.import.probe,
         planned: Vec::new(),
+        claimed: HashSet::new(),
         versioned: false,
         summary: Summary::default(),
     };

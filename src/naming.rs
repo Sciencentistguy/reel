@@ -110,6 +110,33 @@ pub fn destination(config: &Config, item: &Item, version: Option<&str>) -> PathB
     ))
 }
 
+/// Where `item` should live. When `versioned`, the name carries the resolution, plus a copy
+/// number if another file already has that name, so that copies never collide. `current` is
+/// the file's present location, which is always acceptable as its own destination.
+pub fn free_destination(
+    config: &Config,
+    item: &Item,
+    versioned: bool,
+    current: &Path,
+    taken: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    let resolution = item.media.resolution.as_deref().filter(|_| versioned);
+    if !versioned {
+        return destination(config, item, None);
+    }
+    (1..)
+        .map(|copy| {
+            let version = match (resolution, copy) {
+                (resolution, 1) => resolution.map(str::to_owned),
+                (Some(resolution), copy) => Some(format!("{resolution} copy {copy}")),
+                (None, copy) => Some(format!("copy {copy}")),
+            };
+            destination(config, item, version.as_deref())
+        })
+        .find(|candidate| candidate == current || !taken(candidate))
+        .expect("an unbounded range always has a free name")
+}
+
 /// Subtitle files belonging to `video`, each with the suffix (such as `.en.forced.srt`) that
 /// follows the video's stem.
 pub fn sidecars(video: &Path) -> Vec<(PathBuf, String)> {
@@ -174,6 +201,46 @@ mod tests {
             .to_str()
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn copies_get_a_number_when_the_name_is_taken() {
+        let config = Config::default();
+        let mut item = movie();
+        item.media.resolution = Some("1080p".into());
+        let name = |path: PathBuf| path.file_name().unwrap().to_str().unwrap().to_string();
+        let first = destination(&config, &item, Some("1080p"));
+        let free = |current: &Path, taken: &[&PathBuf]| {
+            name(free_destination(&config, &item, true, current, |p| {
+                taken.contains(&&p.to_path_buf())
+            }))
+        };
+
+        assert_eq!(
+            free(&item.path, &[]),
+            "Blade Runner (1982) {tmdb-78} - 1080p.mkv"
+        );
+        assert_eq!(
+            free(&item.path, &[&first]),
+            "Blade Runner (1982) {tmdb-78} - 1080p copy 2.mkv"
+        );
+        assert_eq!(
+            free(&first, &[&first]),
+            "Blade Runner (1982) {tmdb-78} - 1080p.mkv"
+        );
+
+        item.media.resolution = None;
+        let plain = destination(&config, &item, None);
+        assert_eq!(
+            name(free_destination(&config, &item, true, &item.path, |p| p == plain)),
+            "Blade Runner (1982) {tmdb-78} - copy 2.mkv"
+        );
+        assert_eq!(
+            name(free_destination(&config, &item, false, &item.path, |_| {
+                true
+            })),
+            "Blade Runner (1982) {tmdb-78}.mkv"
+        );
     }
 
     #[test]
