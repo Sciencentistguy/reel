@@ -64,6 +64,9 @@ enum Command {
         /// Re-probe every matching file, changed or not.
         #[arg(short, long)]
         force: bool,
+        /// Remove entries for missing files without asking.
+        #[arg(short, long)]
+        yes: bool,
         query: Vec<String>,
     },
     /// Remove matching items from the library.
@@ -112,8 +115,9 @@ fn run(cli: Cli) -> Result<()> {
         Command::Update {
             pretend,
             force,
+            yes,
             query,
-        } => commands::update(&mut open()?, &Query::parse(&query)?, pretend, force),
+        } => commands::update(&mut open()?, &Query::parse(&query)?, pretend, force, yes),
         Command::Remove { delete, yes, query } => {
             commands::remove(&config, &mut open()?, &Query::parse(&query)?, delete, yes)
         }

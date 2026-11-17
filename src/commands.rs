@@ -177,15 +177,19 @@ fn prune(config: &Config, item: &Item) {
 }
 
 /// Reconciles the database with the files on disk.
-pub fn update(library: &mut Library, query: &Query, pretend: bool, force: bool) -> Result<()> {
-    let (mut removed, mut refreshed) = (0, 0);
+pub fn update(
+    library: &mut Library,
+    query: &Query,
+    pretend: bool,
+    force: bool,
+    assume_yes: bool,
+) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut refreshed = 0;
     for mut item in library.query(query)? {
         if !item.path.exists() {
             println!("missing: {}", item.path.display());
-            if !pretend && let Some(id) = item.id {
-                library.remove(id)?;
-            }
-            removed += 1;
+            missing.push(item);
             continue;
         }
         let stamp = file_stamp(&item.path)?;
@@ -204,12 +208,30 @@ pub fn update(library: &mut Library, query: &Query, pretend: bool, force: bool) 
         }
         library.save(&mut item)?;
     }
-    let prefix = if pretend {
-        "Would have removed"
+
+    if pretend {
+        println!(
+            "Would remove {} missing file(s); would refresh {refreshed}.",
+            missing.len()
+        );
+        return Ok(());
+    }
+    let confirmed = missing.is_empty()
+        || assume_yes
+        || prompt(&format!(
+            "Remove {} missing file(s) from the library? [y/N] ",
+            missing.len()
+        ))?
+        .is_some_and(|answer| answer.eq_ignore_ascii_case("y"));
+    let removed = if confirmed {
+        for id in missing.iter().filter_map(|item| item.id) {
+            library.remove(id)?;
+        }
+        missing.len()
     } else {
-        "Removed"
+        0
     };
-    println!("{prefix} {removed} missing file(s); refreshed {refreshed}.");
+    println!("Removed {removed} missing file(s); refreshed {refreshed}.");
     Ok(())
 }
 
