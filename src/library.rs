@@ -309,10 +309,21 @@ impl Library {
 
     /// Whether another library file is a different version of the same film or episode.
     pub fn has_other_versions(&self, item: &Item) -> Result<bool> {
+        self.same_work_exists(item, false)
+    }
+
+    /// Whether another library file is the same film or episode with the same resolution and
+    /// size, which is to say a copy of this very file.
+    pub fn has_duplicate(&self, item: &Item) -> Result<bool> {
+        self.same_work_exists(item, true)
+    }
+
+    fn same_work_exists(&self, item: &Item, same_file: bool) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM items WHERE kind = ?1 AND title = ?2 AND year IS ?3 \
              AND source_id IS ?4 AND edition IS ?5 AND part IS ?6 AND season IS ?7 \
-             AND episode IS ?8 AND air_date IS ?9 AND id IS NOT ?10)",
+             AND episode IS ?8 AND air_date IS ?9 AND id IS NOT ?10 \
+             AND (NOT ?11 OR (size = ?12 AND resolution IS ?13)))",
             params![
                 item.kind.as_str(),
                 item.title,
@@ -324,6 +335,9 @@ impl Library {
                 item.episode,
                 item.air_date,
                 item.id,
+                same_file,
+                item.size as i64,
+                item.media.resolution,
             ],
             |row| row.get(0),
         )?)
@@ -465,5 +479,20 @@ mod tests {
             .remove(0);
         assert!(!library.has_other_versions(&existing).unwrap());
         library.save(&mut existing).unwrap();
+    }
+
+    #[test]
+    fn duplicates() {
+        let library = library();
+        let mut copy = library
+            .query(&Query::parse(&["heat"]).unwrap())
+            .unwrap()
+            .remove(0);
+        copy.id = None;
+        copy.path = "/elsewhere/heat.mkv".into();
+        assert!(library.has_duplicate(&copy).unwrap());
+        copy.size += 1;
+        assert!(!library.has_duplicate(&copy).unwrap());
+        assert!(library.has_other_versions(&copy).unwrap());
     }
 }

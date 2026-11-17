@@ -443,6 +443,19 @@ impl Importer<'_> {
         }
         (item.size, item.mtime) = file_stamp(&file.path)?;
 
+        if self.library.has_duplicate(&item)?
+            || self
+                .planned
+                .iter()
+                .any(|planned| planned.is_duplicate_of(&item))
+        {
+            eprintln!(
+                "  warning: {} is already in the library; skipping",
+                file.path.display()
+            );
+            return Ok(false);
+        }
+
         let has_versions = self.library.has_other_versions(&item)?
             || self.planned.iter().any(|planned| planned.same_work(&item));
         let version = if has_versions {

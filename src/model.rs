@@ -272,6 +272,13 @@ impl Item {
             && self.air_date == other.air_date
     }
 
+    /// Whether `other` is the same film or episode at the same resolution and size.
+    pub fn is_duplicate_of(&self, other: &Item) -> bool {
+        self.same_work(other)
+            && self.size == other.size
+            && self.media.resolution == other.media.resolution
+    }
+
     pub fn episode_code(&self) -> Option<String> {
         if self.date_based {
             return self.air_date.clone();
