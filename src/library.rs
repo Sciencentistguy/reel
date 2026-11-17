@@ -2,13 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, Row, params, params_from_iter};
 
 use crate::model::{AudioStream, Item, Kind, MediaInfo, SubtitleStream};
 use crate::query::Query;
 
-const SCHEMA: &str = "
+/// Schema migrations, applied in order. Entry `n` upgrades a database from version `n` to `n + 1`,
+/// so the schema version is the length of this list. Never edit an entry once released; append.
+const MIGRATIONS: &[&str] = &["
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -63,7 +65,7 @@ CREATE TABLE IF NOT EXISTS subtitle_streams (
     sdh INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (item_id, idx)
 );
-";
+"];
 
 const COLUMNS: &str = "kind, path, original_path, title, year, source, source_id, edition, part, season, episode, \
     episode_end, episode_title, air_date, date_based, width, height, resolution, video_codec, \
@@ -121,6 +123,30 @@ fn item_from_row(row: &Row) -> rusqlite::Result<Item> {
     })
 }
 
+/// Brings the database up to the current schema version. Databases from before versioning report
+/// version 0 and already have the first schema, which its `IF NOT EXISTS` clauses tolerate.
+fn current_version() -> u32 {
+    u32::try_from(MIGRATIONS.len()).expect("migration count fits in u32")
+}
+
+fn migrate(conn: &mut Connection) -> Result<()> {
+    let current = current_version();
+    let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > current {
+        bail!(
+            "the library database has schema version {version}, but this reel only understands up to {current}; upgrade reel"
+        );
+    }
+    for (from, migration) in (0..current).zip(MIGRATIONS).skip(version as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(migration)
+            .with_context(|| format!("cannot migrate the library database from version {from}"))?;
+        tx.pragma_update(None, "user_version", from + 1)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 impl Library {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -137,9 +163,9 @@ impl Library {
         Self::init(Connection::open_in_memory()?)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
-        conn.execute_batch(SCHEMA)?;
+        migrate(&mut conn)?;
         Ok(Library { conn })
     }
 
@@ -361,6 +387,53 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_version(library: &Library) -> u32 {
+        library
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn fresh_database_is_stamped_with_the_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(&dir.path().join("library.db")).unwrap();
+        assert_eq!(user_version(&library), current_version());
+    }
+
+    #[test]
+    fn unversioned_database_is_upgraded_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let legacy = Connection::open(&path).unwrap();
+        legacy.execute_batch(MIGRATIONS[0]).unwrap();
+        legacy
+            .execute(
+                "INSERT INTO items (kind, path, title, size, mtime, added) VALUES ('movie', '/m/heat.mkv', 'Heat', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        drop(legacy);
+
+        let library = Library::open(&path).unwrap();
+        assert_eq!(user_version(&library), current_version());
+        assert!(library.contains_path(Path::new("/m/heat.mkv")).unwrap());
+    }
+
+    #[test]
+    fn newer_database_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let newer = Connection::open(&path).unwrap();
+        newer
+            .pragma_update(None, "user_version", current_version() + 1)
+            .unwrap();
+        drop(newer);
+
+        let error = Library::open(&path).err().unwrap().to_string();
+        assert!(error.contains("upgrade reel"), "{error}");
+    }
 
     fn sample() -> Vec<Item> {
         let mut matrix = Item::new(Kind::Movie, "/m/matrix.mkv".into(), "The Matrix".into());
