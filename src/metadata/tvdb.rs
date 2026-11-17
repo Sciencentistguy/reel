@@ -7,16 +7,14 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{
-    Candidate, EpisodeInfo, ShowSource, agent, distinct_from, non_empty, read_json, year_of,
-};
+use super::{Candidate, EpisodeInfo, Http, ShowSource, distinct_from, non_empty, year_of};
 use crate::config::MetadataConfig;
 
 const BASE: &str = "https://api4.thetvdb.com/v4";
 
 pub struct Tvdb {
     base: String,
-    agent: ureq::Agent,
+    http: Http,
     key: String,
     language: String,
     token: RefCell<Option<String>>,
@@ -101,7 +99,7 @@ impl Tvdb {
         }
         Ok(Tvdb {
             base: base.to_string(),
-            agent: agent(),
+            http: Http::new("TVDB"),
             key: config.tvdb_api_key.clone(),
             language: config.tvdb_language.clone(),
             token: RefCell::new(None),
@@ -112,11 +110,11 @@ impl Tvdb {
         if let Some(token) = self.token.borrow().as_ref() {
             return Ok(token.clone());
         }
-        let response = self
-            .agent
-            .post(format!("{}/login", self.base))
-            .send_json(serde_json::json!({ "apikey": self.key }));
-        let login: Envelope<Login> = read_json("TVDB", response)?;
+        let login: Envelope<Login> = self.http.json(|agent| {
+            agent
+                .post(format!("{}/login", self.base))
+                .send_json(serde_json::json!({ "apikey": self.key }))
+        })?;
         *self.token.borrow_mut() = Some(login.data.token.clone());
         Ok(login.data.token)
     }
@@ -126,14 +124,16 @@ impl Tvdb {
         path: &str,
         query: &[(&str, String)],
     ) -> Result<Envelope<T>> {
-        let mut request = self
-            .agent
-            .get(format!("{}{path}", self.base))
-            .header("Authorization", format!("Bearer {}", self.token()?));
-        for (name, value) in query {
-            request = request.query(*name, value);
-        }
-        read_json("TVDB", request.call())
+        let token = self.token()?;
+        self.http.json(|agent| {
+            let mut request = agent
+                .get(format!("{}{path}", self.base))
+                .header("Authorization", format!("Bearer {token}"));
+            for (name, value) in query {
+                request = request.query(*name, value);
+            }
+            request.call()
+        })
     }
 }
 
@@ -233,6 +233,9 @@ impl ShowSource for Tvdb {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use super::*;
     use crate::metadata::testserver::{Request, Server};
 
@@ -241,7 +244,9 @@ mod tests {
             tvdb_api_key: "secret-key".into(),
             ..MetadataConfig::default()
         };
-        Tvdb::with_base(&config, &server.base).unwrap()
+        let mut tvdb = Tvdb::with_base(&config, &server.base).unwrap();
+        tvdb.http.retry.backoff = Duration::ZERO;
+        tvdb
     }
 
     fn ok(body: &str) -> (u16, String) {
@@ -275,6 +280,30 @@ mod tests {
     fn a_key_is_required() {
         let error = Tvdb::new(&MetadataConfig::default()).err().unwrap();
         assert!(error.to_string().contains("no TVDB API key"));
+    }
+
+    #[test]
+    fn rate_limited_logins_and_requests_are_retried() {
+        let (login_limited, search_limited) = (AtomicBool::new(true), AtomicBool::new(true));
+        let server = Server::start(move |request: &Request| {
+            let limited = match request.path() {
+                "/login" => &login_limited,
+                _ => &search_limited,
+            };
+            match (limited.swap(false, Ordering::SeqCst), request.path()) {
+                (true, _) => (429, "{}".into()),
+                (false, "/login") => login(),
+                (false, _) => ok(SEARCH),
+            }
+        });
+        assert_eq!(
+            client(&server)
+                .search_shows("Doctor Who", None)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(server.paths(), ["/login", "/login", "/search", "/search"]);
     }
 
     #[test]

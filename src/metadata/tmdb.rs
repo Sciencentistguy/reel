@@ -5,8 +5,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use super::{
-    Candidate, EpisodeInfo, MovieSource, ShowSource, agent, distinct_from, non_empty, read_json,
-    year_of,
+    Candidate, EpisodeInfo, Http, MovieSource, ShowSource, distinct_from, non_empty, year_of,
 };
 use crate::config::MetadataConfig;
 
@@ -14,7 +13,7 @@ const BASE: &str = "https://api.themoviedb.org/3";
 
 pub struct Tmdb {
     base: String,
-    agent: ureq::Agent,
+    http: Http,
     key: String,
     language: String,
 }
@@ -105,27 +104,28 @@ impl Tmdb {
         }
         Ok(Tmdb {
             base: base.to_string(),
-            agent: agent(),
+            http: Http::new("TMDB"),
             key: config.tmdb_api_key.clone(),
             language: config.tmdb_language.clone(),
         })
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let mut request = self
-            .agent
-            .get(format!("{}{path}", self.base))
-            .query("language", &self.language);
-        // v4 read access tokens are JWTs sent as bearer tokens; v3 keys go in the query string.
-        request = if self.key.len() > 40 {
-            request.header("Authorization", format!("Bearer {}", self.key))
-        } else {
-            request.query("api_key", &self.key)
-        };
-        for (name, value) in query {
-            request = request.query(*name, value);
-        }
-        read_json("TMDB", request.call())
+        self.http.json(|agent| {
+            let mut request = agent
+                .get(format!("{}{path}", self.base))
+                .query("language", &self.language);
+            // v4 read access tokens are JWTs sent as bearer tokens; v3 keys go in the query string.
+            request = if self.key.len() > 40 {
+                request.header("Authorization", format!("Bearer {}", self.key))
+            } else {
+                request.query("api_key", &self.key)
+            };
+            for (name, value) in query {
+                request = request.query(*name, value);
+            }
+            request.call()
+        })
     }
 
     fn search<T: DeserializeOwned + Into<Candidate>>(
@@ -199,6 +199,9 @@ impl ShowSource for Tmdb {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use super::*;
     use crate::metadata::testserver::{Request, Server};
 
@@ -207,7 +210,9 @@ mod tests {
             tmdb_api_key: key.into(),
             ..MetadataConfig::default()
         };
-        Tmdb::with_base(&config, &server.base).unwrap()
+        let mut tmdb = Tmdb::with_base(&config, &server.base).unwrap();
+        tmdb.http.retry.backoff = Duration::ZERO;
+        tmdb
     }
 
     fn ok(body: &str) -> (u16, String) {
@@ -381,6 +386,23 @@ mod tests {
         assert_eq!(show.overview.as_deref(), Some("Chemistry."));
         assert_eq!(show.original_title, None);
         assert_eq!(tmdb.name(), "tmdb");
+    }
+
+    #[test]
+    fn rate_limited_requests_are_retried() {
+        let limited = AtomicBool::new(true);
+        let server = Server::start(move |_| {
+            if limited.swap(false, Ordering::SeqCst) {
+                (429, "{}".into())
+            } else {
+                ok(r#"{"id": 78, "title": "Blade Runner"}"#)
+            }
+        });
+        assert_eq!(
+            client(&server, "key").movie("78").unwrap().title,
+            "Blade Runner"
+        );
+        assert_eq!(server.paths(), ["/movie/78", "/movie/78"]);
     }
 
     #[test]

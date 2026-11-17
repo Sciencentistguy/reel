@@ -1,5 +1,6 @@
 //! Online metadata sources and candidate scoring.
 
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -56,28 +57,111 @@ pub fn show_source(config: &MetadataConfig) -> Result<Box<dyn ShowSource>> {
     })
 }
 
-pub(crate) fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
-        .user_agent(concat!("reel/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+type Response = Result<ureq::http::Response<ureq::Body>, ureq::Error>;
+
+/// Statuses that mean the service is rate limiting or briefly unavailable.
+const TRANSIENT_STATUSES: [u16; 4] = [429, 502, 503, 504];
+
+/// How requests are retried when a service is rate limiting or briefly unavailable.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Retry {
+    /// Total attempts per request, including the first.
+    pub attempts: u32,
+    /// The wait before the first retry, doubled for each one after it.
+    pub backoff: Duration,
+    /// The longest single wait, including one the service asks for with `Retry-After`.
+    pub max_wait: Duration,
 }
 
-pub(crate) fn read_json<T: DeserializeOwned>(
-    service: &str,
-    result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-) -> Result<T> {
-    match result {
-        Ok(mut response) => response
+impl Default for Retry {
+    fn default() -> Self {
+        Retry {
+            attempts: 5,
+            backoff: Duration::from_secs(1),
+            max_wait: Duration::from_secs(60),
+        }
+    }
+}
+
+impl Retry {
+    /// How long to wait before retrying after `result`, and why, or `None` when it shouldn't be retried.
+    fn wait(&self, retry: u32, result: &Response) -> Option<(Duration, String)> {
+        let (reason, requested) = match result {
+            Ok(response) if TRANSIENT_STATUSES.contains(&response.status().as_u16()) => (
+                format!("HTTP {}", response.status().as_u16()),
+                retry_after(response),
+            ),
+            Err(err @ (ureq::Error::Io(_) | ureq::Error::ConnectionFailed)) => {
+                (err.to_string(), None)
+            }
+            _ => return None,
+        };
+        let backoff = self.backoff.saturating_mul(2u32.saturating_pow(retry - 1));
+        Some((requested.unwrap_or(backoff).min(self.max_wait), reason))
+    }
+}
+
+/// The delay a `Retry-After` header asks for, when given in seconds.
+fn retry_after(response: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
+    let seconds = response.headers().get("retry-after")?.to_str().ok()?;
+    seconds.trim().parse().ok().map(Duration::from_secs)
+}
+
+/// An HTTP client for one metadata service.
+pub(crate) struct Http {
+    service: &'static str,
+    agent: ureq::Agent,
+    pub retry: Retry,
+}
+
+impl Http {
+    pub fn new(service: &'static str) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(30)))
+            .user_agent(concat!("reel/", env!("CARGO_PKG_VERSION")))
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Http {
+            service,
+            agent,
+            retry: Retry::default(),
+        }
+    }
+
+    /// Sends the request `send` makes and decodes its JSON response, retrying it while the
+    /// service is rate limiting or briefly unavailable.
+    pub fn json<T: DeserializeOwned>(&self, send: impl Fn(&ureq::Agent) -> Response) -> Result<T> {
+        let mut retry = 1;
+        loop {
+            let result = send(&self.agent);
+            match self.retry.wait(retry, &result) {
+                Some((wait, reason)) if retry < self.retry.attempts => {
+                    eprintln!(
+                        "  {} is unavailable ({reason}), retrying in {}s",
+                        self.service,
+                        wait.as_secs_f32().ceil()
+                    );
+                    thread::sleep(wait);
+                    retry += 1;
+                }
+                _ => return read_json(self.service, result),
+            }
+        }
+    }
+}
+
+fn read_json<T: DeserializeOwned>(service: &str, result: Response) -> Result<T> {
+    let mut response = result.with_context(|| format!("{service} request failed"))?;
+    match response.status().as_u16() {
+        200..=299 => response
             .body_mut()
             .read_json()
             .with_context(|| format!("unexpected response from {service}")),
-        Err(ureq::Error::StatusCode(401)) => {
-            bail!("{service} rejected the API key (HTTP 401)")
-        }
-        Err(ureq::Error::StatusCode(404)) => bail!("{service}: not found (HTTP 404)"),
-        Err(err) => Err(err).with_context(|| format!("{service} request failed")),
+        401 => bail!("{service} rejected the API key (HTTP 401)"),
+        404 => bail!("{service}: not found (HTTP 404)"),
+        429 => bail!("{service} is rate limiting requests (HTTP 429), try again later"),
+        status => bail!("{service} request failed (HTTP {status})"),
     }
 }
 
@@ -204,18 +288,39 @@ pub(crate) mod testserver {
         String::from_utf8_lossy(&out).into_owned()
     }
 
+    pub struct Reply {
+        pub status: u16,
+        pub headers: Vec<(&'static str, String)>,
+        pub body: String,
+    }
+
+    impl From<(u16, String)> for Reply {
+        fn from((status, body): (u16, String)) -> Self {
+            Reply {
+                status,
+                headers: Vec::new(),
+                body,
+            }
+        }
+    }
+
+    type Handler = dyn Fn(&Request) -> Reply + Send + Sync;
+
     pub struct Server {
         pub base: String,
         requests: Arc<Mutex<Vec<Request>>>,
     }
 
     impl Server {
-        /// Starts a server answering every request with the status and JSON body `handler` returns.
-        pub fn start(handler: impl Fn(&Request) -> (u16, String) + Send + Sync + 'static) -> Self {
+        /// Starts a server answering every request with the reply `handler` returns, usually a
+        /// status and JSON body.
+        pub fn start<R: Into<Reply>>(
+            handler: impl Fn(&Request) -> R + Send + Sync + 'static,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let handler = Arc::new(handler);
+            let handler: Arc<Handler> = Arc::new(move |request: &Request| handler(request).into());
             let log = Arc::clone(&requests);
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
@@ -243,7 +348,7 @@ pub(crate) mod testserver {
 
     fn serve(
         stream: TcpStream,
-        handler: &dyn Fn(&Request) -> (u16, String),
+        handler: &Handler,
         log: &Mutex<Vec<Request>>,
     ) -> std::io::Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -279,14 +384,19 @@ pub(crate) mod testserver {
             headers,
             body: String::from_utf8_lossy(&body).into_owned(),
         };
-        let (status, payload) = handler(&request);
+        let reply = handler(&request);
         log.lock().unwrap().push(request);
 
         let mut stream = stream;
+        write!(stream, "HTTP/1.1 {} Status\r\n", reply.status)?;
+        for (name, value) in &reply.headers {
+            write!(stream, "{name}: {value}\r\n")?;
+        }
         write!(
             stream,
-            "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
-            payload.len()
+            "Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            reply.body.len(),
+            reply.body
         )?;
         stream.flush()
     }
@@ -294,6 +404,9 @@ pub(crate) mod testserver {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::testserver::{Reply, Server};
     use super::*;
 
     fn candidate(title: &str, year: i32) -> Candidate {
@@ -437,22 +550,121 @@ mod tests {
         );
     }
 
+    fn fast_http() -> Http {
+        let mut http = Http::new("TMDB");
+        http.retry.backoff = Duration::ZERO;
+        http.retry.max_wait = Duration::ZERO;
+        http
+    }
+
+    fn fetch(http: &Http, server: &Server) -> Result<serde_json::Value> {
+        http.json(|agent| agent.get(&server.base).call())
+    }
+
+    /// A server replying with each of `statuses` in turn, then with `{"ok": true}`.
+    fn sequence(statuses: &[u16]) -> Server {
+        let statuses = statuses.to_vec();
+        let count = AtomicUsize::new(0);
+        Server::start(move |_| {
+            let status = statuses.get(count.fetch_add(1, Ordering::SeqCst));
+            (*status.unwrap_or(&200), r#"{"ok": true}"#.to_string())
+        })
+    }
+
+    fn response(status: u16, retry_after: Option<&str>) -> Response {
+        let mut builder = ureq::http::Response::builder().status(status);
+        if let Some(value) = retry_after {
+            builder = builder.header("Retry-After", value);
+        }
+        Ok(builder.body(ureq::Body::builder().data("")).unwrap())
+    }
+
     #[test]
     fn http_failures_become_helpful_errors() {
-        let failure = |error| {
-            read_json::<serde_json::Value>("TMDB", Err(error))
-                .unwrap_err()
-                .to_string()
+        let failure = |status| {
+            let server = Server::start(move |_| (status, "{}".to_string()));
+            fetch(&fast_http(), &server).unwrap_err().to_string()
         };
+        assert_eq!(failure(401), "TMDB rejected the API key (HTTP 401)");
+        assert_eq!(failure(404), "TMDB: not found (HTTP 404)");
         assert_eq!(
-            failure(ureq::Error::StatusCode(401)),
-            "TMDB rejected the API key (HTTP 401)"
+            failure(429),
+            "TMDB is rate limiting requests (HTTP 429), try again later"
         );
+        assert_eq!(failure(500), "TMDB request failed (HTTP 500)");
+    }
+
+    #[test]
+    fn transient_failures_are_retried() {
+        let server = sequence(&[429, 503, 502, 504]);
+        let value = fetch(&fast_http(), &server).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(server.requests().len(), 5);
+    }
+
+    #[test]
+    fn retries_give_up_after_the_last_attempt() {
+        let server = sequence(&[429; 10]);
+        let mut http = fast_http();
+        http.retry.attempts = 3;
+        assert!(fetch(&http, &server).is_err());
+        assert_eq!(server.requests().len(), 3);
+    }
+
+    #[test]
+    fn permanent_failures_are_not_retried() {
+        for status in [400, 401, 404, 500] {
+            let server = sequence(&[status]);
+            assert!(fetch(&fast_http(), &server).is_err());
+            assert_eq!(server.requests().len(), 1, "HTTP {status}");
+        }
+    }
+
+    #[test]
+    fn retry_after_is_honoured() {
+        let server = Server::start({
+            let count = AtomicUsize::new(0);
+            move |_| -> Reply {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Reply {
+                        status: 429,
+                        headers: vec![("Retry-After", "0".into())],
+                        body: "{}".into(),
+                    }
+                } else {
+                    (200, "[]".to_string()).into()
+                }
+            }
+        });
+        let mut http = Http::new("TMDB");
+        http.retry.backoff = Duration::from_secs(3600);
+        assert_eq!(fetch(&http, &server).unwrap(), serde_json::json!([]));
+    }
+
+    #[test]
+    fn waits_back_off_and_are_capped() {
+        let retry = Retry {
+            attempts: 5,
+            backoff: Duration::from_secs(1),
+            max_wait: Duration::from_secs(10),
+        };
+        let wait = |n, result: &Response| retry.wait(n, result).map(|(wait, _)| wait.as_secs());
+        let busy = response(503, None);
+        assert_eq!(wait(1, &busy), Some(1));
+        assert_eq!(wait(2, &busy), Some(2));
+        assert_eq!(wait(3, &busy), Some(4));
+        assert_eq!(wait(5, &busy), Some(10));
+        assert_eq!(wait(1, &response(429, Some("7"))), Some(7));
+        assert_eq!(wait(1, &response(429, Some("120"))), Some(10));
         assert_eq!(
-            failure(ureq::Error::StatusCode(404)),
-            "TMDB: not found (HTTP 404)"
+            wait(2, &response(429, Some("Wed, 21 Oct 2015 07:28:00 GMT"))),
+            Some(2),
+            "HTTP dates fall back to the backoff"
         );
-        assert_eq!(failure(ureq::Error::StatusCode(500)), "TMDB request failed");
+        assert_eq!(wait(1, &Err(ureq::Error::ConnectionFailed)), Some(1));
+        assert_eq!(wait(1, &Err(ureq::Error::HostNotFound)), None);
+        assert_eq!(wait(1, &response(500, None)), None);
+        assert_eq!(wait(1, &response(200, None)), None);
     }
 
     #[test]
