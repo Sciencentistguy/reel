@@ -397,3 +397,470 @@ pub fn config(config: &Config, path: &Path, show_path: bool, init: bool) -> Resu
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::model::{AudioStream, SubtitleStream};
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        config: Config,
+        library: Library,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = Config::default();
+            config.library.movies = dir.path().join("Movies");
+            config.library.tv = dir.path().join("TV");
+            Fixture {
+                dir,
+                config,
+                library: Library::in_memory().unwrap(),
+            }
+        }
+
+        fn write(&self, relative: &str, contents: &str) -> PathBuf {
+            let path = self.dir.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        }
+
+        /// Adds Heat (1995) as an identified film whose file is at `relative`.
+        fn film(&mut self, relative: &str, resolution: Option<&str>) -> Item {
+            let path = self.write(relative, "video");
+            let mut item = Item::new(Kind::Movie, path.clone(), "Heat".into());
+            item.year = Some(1995);
+            item.source = Some("tmdb".into());
+            item.source_id = Some("949".into());
+            item.media.resolution = resolution.map(str::to_owned);
+            (item.size, item.mtime) = file_stamp(&path).unwrap();
+            self.library.save(&mut item).unwrap();
+            item
+        }
+
+        fn rows(&self) -> Vec<Item> {
+            self.library.query(&Query::default()).unwrap()
+        }
+
+        fn paths(&self) -> Vec<PathBuf> {
+            self.rows().into_iter().map(|item| item.path).collect()
+        }
+
+        fn movies(&self, relative: &str) -> PathBuf {
+            self.config.library.movies.join(relative)
+        }
+    }
+
+    fn query(terms: &[&str]) -> Query {
+        Query::parse(terms).unwrap()
+    }
+
+    #[test]
+    fn sizes_are_human_readable() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(5 * 1024 * 1024 * 1024), "5.0 GiB");
+        assert_eq!(human_size(u64::MAX), "16777216.0 TiB");
+    }
+
+    #[test]
+    fn durations_are_human_readable() {
+        assert_eq!(human_duration(0.0), "0h 00m");
+        assert_eq!(human_duration(59.6), "0h 01m");
+        assert_eq!(human_duration(3661.0), "1h 01m");
+        assert_eq!(human_duration(90_000.0), "1d 1h 00m");
+    }
+
+    #[test]
+    fn tallies_sort_by_count_then_name_and_label_gaps() {
+        let items: Vec<Item> = [
+            Some("1080p"),
+            Some("2160p"),
+            None,
+            Some("1080p"),
+            Some("720p"),
+        ]
+        .into_iter()
+        .map(|resolution| {
+            let mut item = Item::new(Kind::Movie, "/x.mkv".into(), "X".into());
+            item.media.resolution = resolution.map(str::to_owned);
+            item
+        })
+        .collect();
+        let counts = tally(&items, |item| item.media.resolution.clone());
+        assert_eq!(
+            counts,
+            [
+                ("1080p".to_string(), 2),
+                ("2160p".to_string(), 1),
+                ("720p".to_string(), 1),
+                ("unknown".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn move_renames_the_file_and_its_subtitles_and_updates_the_database() {
+        let mut fixture = Fixture::new();
+        fixture.film("Movies/messy/heat.mkv", None);
+        fixture.write("Movies/messy/heat.en.srt", "sub");
+        fixture.write("Movies/messy/notes.txt", "keep");
+
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+
+        let video = fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv");
+        assert_eq!(fixture.paths(), [video.clone()]);
+        assert!(video.exists());
+        assert!(video.with_extension("en.srt").exists());
+        assert!(!fixture.movies("messy/heat.mkv").exists());
+        assert!(!fixture.movies("messy/heat.en.srt").exists());
+        assert!(fixture.movies("messy/notes.txt").exists());
+    }
+
+    #[test]
+    fn move_prunes_directories_it_empties_but_not_the_library_root() {
+        let mut fixture = Fixture::new();
+        fixture.film("Movies/old/name/heat.mkv", None);
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+        assert!(!fixture.movies("old").exists());
+        assert!(fixture.config.library.movies.is_dir());
+    }
+
+    #[test]
+    fn pretend_move_changes_nothing() {
+        let mut fixture = Fixture::new();
+        let item = fixture.film("Movies/messy/heat.mkv", None);
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), true).unwrap();
+        assert!(item.path.exists());
+        assert_eq!(fixture.paths(), [item.path]);
+        assert!(!fixture.movies("Heat (1995) {tmdb-949}").exists());
+    }
+
+    #[test]
+    fn move_leaves_correctly_named_files_alone() {
+        let mut fixture = Fixture::new();
+        let item = fixture.film(
+            "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv",
+            None,
+        );
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+        assert_eq!(fixture.paths(), [item.path.clone()]);
+        assert!(item.path.exists());
+    }
+
+    #[test]
+    fn move_only_touches_matching_items() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/messy/heat.mkv", None);
+        let mut other = Item::new(
+            Kind::Movie,
+            fixture.write("Movies/messy/ronin.mkv", "video"),
+            "Ronin".into(),
+        );
+        other.year = Some(1998);
+        fixture.library.save(&mut other).unwrap();
+
+        move_items(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["ronin"]),
+            false,
+        )
+        .unwrap();
+
+        assert!(heat.path.exists(), "Heat did not match the query");
+        assert!(fixture.movies("Ronin (1998)/Ronin (1998).mkv").exists());
+    }
+
+    #[test]
+    fn move_adds_version_suffixes_to_every_copy() {
+        let mut fixture = Fixture::new();
+        fixture.film(
+            "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv",
+            Some("1080p"),
+        );
+        let mut better = fixture.film("Movies/downloads/heat-uhd.mkv", Some("2160p"));
+        better.size += 1;
+        fixture.library.save(&mut better).unwrap();
+
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+
+        let mut paths = fixture.paths();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p.mkv"),
+                fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p.mkv"),
+            ]
+        );
+        assert!(paths.iter().all(|path| path.exists()));
+    }
+
+    #[test]
+    fn move_numbers_copies_that_would_share_a_name() {
+        let mut fixture = Fixture::new();
+        fixture.film("Movies/a/heat.mkv", Some("1080p"));
+        let mut second = fixture.film("Movies/b/heat.mkv", Some("1080p"));
+        second.size += 1;
+        fixture.library.save(&mut second).unwrap();
+
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+
+        let mut paths = fixture.paths();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p copy 2.mkv"),
+                fixture.movies("Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p.mkv"),
+            ]
+        );
+        assert!(paths.iter().all(|path| path.exists()));
+    }
+
+    #[test]
+    fn move_survives_a_missing_file() {
+        let mut fixture = Fixture::new();
+        let item = fixture.film("Movies/messy/heat.mkv", None);
+        fs::remove_file(&item.path).unwrap();
+        move_items(&fixture.config, &mut fixture.library, &query(&[]), false).unwrap();
+        assert_eq!(fixture.paths(), [item.path], "the row is left as it was");
+    }
+
+    #[test]
+    fn update_leaves_unchanged_files_alone() {
+        let mut fixture = Fixture::new();
+        let item = fixture.film("Movies/heat.mkv", Some("1080p"));
+        update(&mut fixture.library, &query(&[]), false, false, true).unwrap();
+        let rows = fixture.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].size, rows[0].mtime), (item.size, item.mtime));
+        assert_eq!(rows[0].media.resolution.as_deref(), Some("1080p"));
+    }
+
+    #[test]
+    fn update_notices_changed_files() {
+        let mut fixture = Fixture::new();
+        let item = fixture.film("Movies/heat.mkv", None);
+        fs::write(&item.path, "a much longer video").unwrap();
+        update(&mut fixture.library, &query(&[]), false, false, true).unwrap();
+        assert_eq!(fixture.rows()[0].size, "a much longer video".len() as u64);
+    }
+
+    #[test]
+    fn pretend_update_changes_nothing() {
+        let mut fixture = Fixture::new();
+        let changed = fixture.film("Movies/changed.mkv", None);
+        fs::write(&changed.path, "a much longer video").unwrap();
+        let mut missing = Item::new(
+            Kind::Movie,
+            fixture.dir.path().join("gone.mkv"),
+            "Gone".into(),
+        );
+        fixture.library.save(&mut missing).unwrap();
+
+        update(&mut fixture.library, &query(&[]), true, false, true).unwrap();
+
+        assert_eq!(fixture.rows().len(), 2);
+        let row = fixture.library.query(&query(&["heat"])).unwrap().remove(0);
+        assert_eq!(row.size, changed.size);
+    }
+
+    #[test]
+    fn update_removes_rows_for_missing_files_when_confirmed() {
+        let mut fixture = Fixture::new();
+        let kept = fixture.film("Movies/heat.mkv", None);
+        let mut gone = Item::new(
+            Kind::Movie,
+            fixture.dir.path().join("gone.mkv"),
+            "Gone".into(),
+        );
+        fixture.library.save(&mut gone).unwrap();
+
+        update(&mut fixture.library, &query(&[]), false, false, true).unwrap();
+
+        assert_eq!(fixture.paths(), [kept.path]);
+    }
+
+    #[test]
+    fn update_only_considers_matching_items() {
+        let mut fixture = Fixture::new();
+        fixture.film("Movies/heat.mkv", None);
+        let mut gone = Item::new(
+            Kind::Movie,
+            fixture.dir.path().join("gone.mkv"),
+            "Gone".into(),
+        );
+        fixture.library.save(&mut gone).unwrap();
+
+        update(&mut fixture.library, &query(&["heat"]), false, false, true).unwrap();
+
+        assert_eq!(fixture.rows().len(), 2);
+    }
+
+    #[test]
+    fn remove_drops_rows_and_keeps_files_by_default() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/heat.mkv", None);
+        let mut ronin = Item::new(
+            Kind::Movie,
+            fixture.write("Movies/ronin.mkv", "x"),
+            "Ronin".into(),
+        );
+        fixture.library.save(&mut ronin).unwrap();
+
+        remove(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["heat"]),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(fixture.paths(), [ronin.path]);
+        assert!(heat.path.exists());
+    }
+
+    #[test]
+    fn remove_with_delete_removes_files_sidecars_and_empty_directories() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/Heat (1995)/Heat (1995).mkv", None);
+        let subtitle = fixture.write("Movies/Heat (1995)/Heat (1995).en.srt", "sub");
+        let other = fixture.write("Movies/Heat (1995)/Heat (1995) trailer.txt", "unrelated");
+        fs::remove_file(&other).unwrap();
+
+        remove(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["heat"]),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(fixture.rows().is_empty());
+        assert!(!heat.path.exists());
+        assert!(!subtitle.exists());
+        assert!(!fixture.movies("Heat (1995)").exists());
+        assert!(fixture.config.library.movies.is_dir());
+    }
+
+    #[test]
+    fn remove_with_delete_keeps_unrelated_files_in_the_directory() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/Heat (1995)/Heat (1995).mkv", None);
+        let poster = fixture.write("Movies/Heat (1995)/poster.jpg", "art");
+
+        remove(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["heat"]),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert!(!heat.path.exists());
+        assert!(poster.exists());
+    }
+
+    #[test]
+    fn remove_with_delete_tolerates_files_that_are_already_gone() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/heat.mkv", None);
+        fs::remove_file(&heat.path).unwrap();
+        remove(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["heat"]),
+            true,
+            true,
+        )
+        .unwrap();
+        assert!(fixture.rows().is_empty());
+    }
+
+    #[test]
+    fn remove_without_matches_does_nothing() {
+        let mut fixture = Fixture::new();
+        fixture.film("Movies/heat.mkv", None);
+        remove(
+            &fixture.config,
+            &mut fixture.library,
+            &query(&["nonexistent"]),
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(fixture.rows().len(), 1);
+        assert!(fixture.rows()[0].path.exists());
+    }
+
+    #[test]
+    fn listing_info_and_stats_handle_fully_populated_items() {
+        let mut fixture = Fixture::new();
+        let mut item = fixture.film("Movies/heat.mkv", Some("2160p"));
+        item.original_path = Some("/downloads/heat.mkv".into());
+        item.media.duration = Some(10_200.0);
+        item.media.hdr = Some("DV/HDR10".into());
+        item.media.dv_profile = Some("7 FEL".into());
+        item.media.video_codec = Some("hevc".into());
+        item.media.colour_space = Some("bt2020nc".into());
+        item.media.audio = vec![AudioStream {
+            codec: Some("truehd".into()),
+            layout: Some("7.1".into()),
+            atmos: true,
+            ..AudioStream::default()
+        }];
+        item.media.subtitles = vec![SubtitleStream {
+            language: Some("eng".into()),
+            sdh: true,
+            ..SubtitleStream::default()
+        }];
+        fixture.library.save(&mut item).unwrap();
+        fixture.write("Movies/heat.en.srt", "sub");
+
+        let everything = query(&[]);
+        list(&fixture.library, &everything, None, false).unwrap();
+        list(&fixture.library, &everything, None, true).unwrap();
+        list(&fixture.library, &everything, Some("$title"), false).unwrap();
+        info(&fixture.library, &everything).unwrap();
+        stats(&fixture.library, &everything).unwrap();
+        stats(&Library::in_memory().unwrap(), &everything).unwrap();
+    }
+
+    #[test]
+    fn config_init_writes_a_loadable_file_and_refuses_to_overwrite_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/config.toml");
+        let config = Config::default();
+
+        super::config(&config, &path, false, true).unwrap();
+        assert!(Config::load(&path).is_ok());
+
+        let before = fs::read_to_string(&path).unwrap();
+        let error = super::config(&config, &path, false, true).unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn config_shows_the_path_or_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        super::config(&Config::default(), &path, true, false).unwrap();
+        super::config(&Config::default(), &path, false, false).unwrap();
+        assert!(!path.exists(), "showing never writes");
+    }
+}
