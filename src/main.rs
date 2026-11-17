@@ -16,9 +16,9 @@ mod parse;
 mod probe;
 mod query;
 
-use config::{Config, Operation};
+use config::Config;
 use library::Library;
-use model::{Item, Kind};
+use model::Item;
 use query::Query;
 
 /// Organise a library of films and TV shows using Plex's naming conventions.
@@ -36,26 +36,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Identify video files and file them into the library.
-    Import {
-        /// Files or directories to import.
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-        /// How to place files in the library (overrides the configuration).
-        #[arg(short, long, value_enum)]
-        operation: Option<Operation>,
-        /// Never prompt; skip anything without a confident match.
-        #[arg(short, long)]
-        quiet: bool,
-        /// Show what would happen without touching files or the database.
-        #[arg(short = 'n', long)]
-        pretend: bool,
-        /// Treat every file as this kind instead of guessing from its name.
-        #[arg(short, long, value_enum)]
-        kind: Option<Kind>,
-        /// Skip metadata lookups and name files from what their current names say.
-        #[arg(short = 'A', long)]
-        asis: bool,
-    },
+    Import(import::Options),
     /// List library items matching a query.
     #[command(visible_alias = "ls")]
     List {
@@ -118,24 +99,7 @@ fn run(cli: Cli) -> Result<()> {
     let open = || Library::open(&config.library.database);
 
     match cli.command {
-        Command::Import {
-            paths,
-            operation,
-            quiet,
-            pretend,
-            kind,
-            asis,
-        } => {
-            let options = import::Options {
-                paths,
-                operation,
-                quiet,
-                pretend,
-                kind,
-                asis,
-            };
-            import::run(&config, &mut open()?, &options)
-        }
+        Command::Import(options) => import::run(&config, &mut open()?, &options),
         Command::List {
             format,
             path,

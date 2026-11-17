@@ -35,12 +35,25 @@ const EXTRAS_DIRECTORIES: &[&str] = &[
     "trailers",
 ];
 
+#[derive(clap::Args)]
 pub struct Options {
+    /// Files or directories to import.
+    #[arg(required = true)]
     pub paths: Vec<PathBuf>,
+    /// How to place files in the library (overrides the configuration).
+    #[arg(short, long, value_enum)]
     pub operation: Option<Operation>,
+    /// Never prompt; skip anything without a confident match.
+    #[arg(short, long)]
     pub quiet: bool,
+    /// Show what would happen without touching files or the database.
+    #[arg(short = 'n', long)]
     pub pretend: bool,
+    /// Treat every file as this kind instead of guessing from its name.
+    #[arg(short, long, value_enum)]
     pub kind: Option<Kind>,
+    /// Skip metadata lookups and name files from what their current names say.
+    #[arg(short = 'A', long)]
     pub asis: bool,
 }
 
