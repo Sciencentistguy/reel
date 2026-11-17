@@ -49,7 +49,10 @@ enum Command {
         query: Vec<String>,
     },
     /// Show everything known about matching items, including their streams.
-    Info { query: Vec<String> },
+    Info {
+        #[arg(required = true)]
+        query: Vec<String>,
+    },
     /// Rename matching files to follow the current naming scheme.
     #[command(visible_alias = "mv")]
     Move {
@@ -99,29 +102,47 @@ enum Command {
 fn run(cli: Cli) -> Result<()> {
     let config_path = cli.config.unwrap_or_else(config::default_path);
     let config = Config::load(&config_path)?;
-    let open = || Library::open(&config.library.database);
+    let open_library = || Library::open(&config.library.database);
 
     match cli.command {
-        Command::Import(options) => import::run(&config, &mut open()?, &options),
+        Command::Import(options) => import::run(&config, &mut open_library()?, &options),
         Command::List {
             format,
             path,
             query,
-        } => commands::list(&open()?, &Query::parse(&query)?, format.as_deref(), path),
-        Command::Info { query } => commands::info(&open()?, &Query::parse(&query)?),
-        Command::Move { pretend, query } => {
-            commands::move_items(&config, &mut open()?, &Query::parse(&query)?, pretend)
-        }
+        } => commands::list(
+            &open_library()?,
+            &Query::parse(&query)?,
+            format.as_deref(),
+            path,
+        ),
+        Command::Info { query } => commands::info(&open_library()?, &Query::parse(&query)?),
+        Command::Move { pretend, query } => commands::move_items(
+            &config,
+            &mut open_library()?,
+            &Query::parse(&query)?,
+            pretend,
+        ),
         Command::Update {
             pretend,
             force,
             yes,
             query,
-        } => commands::update(&mut open()?, &Query::parse(&query)?, pretend, force, yes),
-        Command::Remove { delete, yes, query } => {
-            commands::remove(&config, &mut open()?, &Query::parse(&query)?, delete, yes)
-        }
-        Command::Stats { query } => commands::stats(&open()?, &Query::parse(&query)?),
+        } => commands::update(
+            &mut open_library()?,
+            &Query::parse(&query)?,
+            pretend,
+            force,
+            yes,
+        ),
+        Command::Remove { delete, yes, query } => commands::remove(
+            &config,
+            &mut open_library()?,
+            &Query::parse(&query)?,
+            delete,
+            yes,
+        ),
+        Command::Stats { query } => commands::stats(&open_library()?, &Query::parse(&query)?),
         Command::Fields => {
             for field in Item::FIELDS {
                 println!("{field}");
