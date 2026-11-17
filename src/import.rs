@@ -229,6 +229,26 @@ fn describe(title: &str, year: Option<i32>) -> String {
     }
 }
 
+fn match_percent(distance: f64) -> String {
+    let colour = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    colour_percent(((1.0 - distance) * 100.0).round(), colour)
+}
+
+/// Formats a match percentage, coloured by how trustworthy it is when `colour` is set.
+fn colour_percent(percent: f64, colour: bool) -> String {
+    let text = format!("{percent:.0}%");
+    if !colour {
+        return text;
+    }
+    let code = match percent {
+        p if p >= 95.0 => 32,
+        p if p >= 90.0 => 92,
+        p if p >= 75.0 => 33,
+        _ => 31,
+    };
+    format!("\x1b[{code}m{text}\x1b[0m")
+}
+
 fn decide(
     group: &Group,
     lookup: &Lookup,
@@ -258,11 +278,11 @@ fn decide(
         if !searched_manually && metadata::is_strong(&ranked, threshold) {
             let (distance, candidate) = ranked.into_iter().next().unwrap();
             println!(
-                "  Matched: {} [{}-{}] ({:.0}%)",
+                "  Matched: {} [{}-{}] ({})",
                 describe(&candidate.title, candidate.year),
                 candidate.source,
                 candidate.id,
-                (1.0 - distance) * 100.0
+                match_percent(distance)
             );
             return Ok(Decision::Use(candidate));
         }
@@ -287,12 +307,12 @@ fn decide(
                 count => format!(" - already in library ({count} file(s))"),
             };
             println!(
-                "  {}. {} [{}-{}] ({:.0}%){known}",
+                "  {}. {} [{}-{}] ({}){known}",
                 number + 1,
                 describe(&candidate.title, candidate.year),
                 candidate.source,
                 candidate.id,
-                (1.0 - distance) * 100.0
+                match_percent(*distance)
             );
         }
         loop {
@@ -680,6 +700,19 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colours_percentages_by_quality() {
+        let code = |percent| colour_percent(percent, true);
+        assert_eq!(code(98.0), "\x1b[32m98%\x1b[0m");
+        assert_eq!(code(95.0), "\x1b[32m95%\x1b[0m");
+        assert_eq!(code(94.0), "\x1b[92m94%\x1b[0m");
+        assert_eq!(code(90.0), "\x1b[92m90%\x1b[0m");
+        assert_eq!(code(89.0), "\x1b[33m89%\x1b[0m");
+        assert_eq!(code(75.0), "\x1b[33m75%\x1b[0m");
+        assert_eq!(code(66.0), "\x1b[31m66%\x1b[0m");
+        assert_eq!(colour_percent(98.0, false), "98%");
+    }
 
     fn episodes() -> Vec<EpisodeInfo> {
         let episode = |season, number, title: &str, date: &str| EpisodeInfo {
