@@ -113,6 +113,9 @@ group (overriding any `{edition-…}` in the names), or skip. `--quiet` never pr
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
 names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.
 
+An entered ID or URL is shown with its match percentage. A confident match is used straight
+away, as with search results; otherwise, or in timid mode, you are asked to confirm it.
+
 When a film is a single file and the match is uncertain, reel compares the file's running time
 (from ffprobe, unless `probe = false`) with TMDB's for the best few candidates. That separates
 remakes and films that share a name. A difference of up to 6% is ignored, which covers PAL speed-up

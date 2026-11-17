@@ -372,6 +372,25 @@ fn with_runtimes(
     metadata::rank(title, year, length, candidates)
 }
 
+/// Prints one candidate as `<label> Title (year) [source-id] (match%, runtime)` and its details.
+fn print_candidate(label: &str, candidate: &Candidate, distance: f64, in_library: i64) {
+    let known = match in_library {
+        0 => String::new(),
+        count => format!(" - already in library ({count} file(s))"),
+    };
+    let runtime = candidate.runtime.map_or(String::new(), |minutes| {
+        format!(", {}", human_duration(f64::from(minutes) * 60.0))
+    });
+    println!(
+        "  {label} {} [{}-{}] ({}{runtime}){known}",
+        describe_candidate(candidate),
+        candidate.source,
+        candidate.id,
+        match_percent(distance)
+    );
+    print_details(candidate);
+}
+
 fn decide(
     group: &Group,
     lookup: &Lookup,
@@ -440,22 +459,7 @@ fn decide(
             })
             .collect::<Result<Vec<_>>>()?;
         for (number, ((distance, candidate), count)) in shown.iter().zip(&in_library).enumerate() {
-            let known = match count {
-                0 => String::new(),
-                count => format!(" - already in library ({count} file(s))"),
-            };
-            let runtime = candidate.runtime.map_or(String::new(), |minutes| {
-                format!(", {}", human_duration(f64::from(minutes) * 60.0))
-            });
-            println!(
-                "  {}. {} [{}-{}] ({}{runtime}){known}",
-                number + 1,
-                describe_candidate(candidate),
-                candidate.source,
-                candidate.id,
-                match_percent(*distance)
-            );
-            print_details(candidate);
+            print_candidate(&format!("{}.", number + 1), candidate, *distance, *count);
         }
         loop {
             let default = if shown.is_empty() {
@@ -512,9 +516,26 @@ fn decide(
                     let Some(id) = prompt(&format!("  {} ID: ", lookup.source()))? else {
                         return Ok(Decision::Abort);
                     };
-                    match lookup.by_id(&id) {
-                        Ok(candidate) => return Ok(Decision::Use(candidate)),
-                        Err(err) => eprintln!("  {err:#}"),
+                    let candidate = match lookup.by_id(&id) {
+                        Ok(candidate) => candidate,
+                        Err(err) => {
+                            eprintln!("  {err:#}");
+                            continue;
+                        }
+                    };
+                    let ranked = metadata::rank(&title, year, group.length, vec![candidate]);
+                    let (distance, candidate) = &ranked[0];
+                    let count =
+                        library.count_identified(group.kind, candidate.source, &candidate.id)?;
+                    print_candidate("Found:", candidate, *distance, count);
+                    if !timid && metadata::is_strong(&ranked, threshold) {
+                        return Ok(Decision::Use(ranked.into_iter().next().unwrap().1));
+                    }
+                    let Some(answer) = prompt("  Use this match? [Y/n] ")? else {
+                        return Ok(Decision::Abort);
+                    };
+                    if answer.is_empty() || answer.eq_ignore_ascii_case("y") {
+                        return Ok(Decision::Use(ranked.into_iter().next().unwrap().1));
                     }
                 }
                 other => match other.parse::<usize>() {
