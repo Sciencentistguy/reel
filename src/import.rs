@@ -229,7 +229,13 @@ fn describe(title: &str, year: Option<i32>) -> String {
     }
 }
 
-fn decide(group: &Group, lookup: &Lookup, threshold: f64, interactive: bool) -> Result<Decision> {
+fn decide(
+    group: &Group,
+    lookup: &Lookup,
+    library: &Library,
+    threshold: f64,
+    interactive: bool,
+) -> Result<Decision> {
     if let Some((source, id)) = &group.id_hint
         && source == lookup.source()
     {
@@ -269,9 +275,19 @@ fn decide(group: &Group, lookup: &Lookup, threshold: f64, interactive: bool) -> 
         if shown.is_empty() {
             println!("  No candidates found for {:?}.", describe(&title, year));
         }
-        for (number, (distance, candidate)) in shown.iter().enumerate() {
+        let in_library = shown
+            .iter()
+            .map(|(_, candidate)| {
+                library.count_identified(group.kind, candidate.source, &candidate.id)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (number, ((distance, candidate), count)) in shown.iter().zip(&in_library).enumerate() {
+            let known = match count {
+                0 => String::new(),
+                count => format!(" - already in library ({count} file(s))"),
+            };
             println!(
-                "  {}. {} [{}-{}] ({:.0}%)",
+                "  {}. {} [{}-{}] ({:.0}%){known}",
                 number + 1,
                 describe(&candidate.title, candidate.year),
                 candidate.source,
@@ -280,7 +296,12 @@ fn decide(group: &Group, lookup: &Lookup, threshold: f64, interactive: bool) -> 
             );
         }
         loop {
-            let default = if shown.is_empty() { "s" } else { "1" };
+            let default = if shown.is_empty() {
+                "s".to_string()
+            } else {
+                let first_known = in_library.iter().position(|&count| count > 0);
+                (first_known.unwrap_or(0) + 1).to_string()
+            };
             let Some(answer) = prompt(&format!(
                 "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d, a[b]ort? [{default}] "
             ))?
@@ -288,7 +309,7 @@ fn decide(group: &Group, lookup: &Lookup, threshold: f64, interactive: bool) -> 
                 return Ok(Decision::Abort);
             };
             let answer = if answer.is_empty() {
-                default.to_string()
+                default.clone()
             } else {
                 answer.to_lowercase()
             };
@@ -592,7 +613,13 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
                     Lookup::Show(shows.as_deref().unwrap())
                 }
             };
-            decide(&group, &lookup, config.import.strong_match, interactive)?
+            decide(
+                &group,
+                &lookup,
+                importer.library,
+                config.import.strong_match,
+                interactive,
+            )?
         };
         let candidate = match decision {
             Decision::Use(candidate) => Some(candidate),

@@ -326,6 +326,15 @@ impl Library {
         Ok(items)
     }
 
+    /// How many library files of `kind` were identified as `source`'s entry `id`.
+    pub fn count_identified(&self, kind: Kind, source: &str, id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM items WHERE kind = ?1 AND source = ?2 AND source_id = ?3",
+            params![kind.as_str(), source, id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Whether another library file is a different version of the same film or episode.
     pub fn has_other_versions(&self, item: &Item) -> Result<bool> {
         self.same_work_exists(item, false)
@@ -519,6 +528,30 @@ mod tests {
         let mut item = sample().remove(0);
         item.original_path = Some("/downloads/matrix.mkv".into());
         library.save(&mut item).unwrap();
+    }
+
+    #[test]
+    fn counts_identified_items() {
+        let mut library = Library::in_memory().unwrap();
+        let mut item = sample().remove(0);
+        (item.source, item.source_id) = (Some("tmdb".into()), Some("603".into()));
+        library.save(&mut item).unwrap();
+        assert_eq!(
+            library
+                .count_identified(Kind::Movie, "tmdb", "603")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            library.count_identified(Kind::Movie, "tmdb", "1").unwrap(),
+            0
+        );
+        assert_eq!(
+            library
+                .count_identified(Kind::Episode, "tmdb", "603")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
