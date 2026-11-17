@@ -236,14 +236,23 @@ fn describe(title: &str, year: Option<i32>) -> String {
     }
 }
 
-const OVERVIEW_WIDTH: usize = 200;
+const OVERVIEW_LENGTH: usize = 300;
+const DETAIL_INDENT: &str = "     ";
+const MAX_DETAIL_WIDTH: usize = 100;
 
 fn print_details(candidate: &Candidate) {
     if let Some(original) = &candidate.original_title {
-        println!("     Original title: {original}");
+        println!("{DETAIL_INDENT}Original title: {original}");
     }
     if let Some(overview) = &candidate.overview {
-        println!("     {}", truncate(overview, OVERVIEW_WIDTH));
+        let width = textwrap::termwidth().min(MAX_DETAIL_WIDTH);
+        let options = textwrap::Options::new(width)
+            .initial_indent(DETAIL_INDENT)
+            .subsequent_indent(DETAIL_INDENT);
+        println!(
+            "{}",
+            textwrap::fill(&truncate(overview, OVERVIEW_LENGTH), options)
+        );
     }
 }
 
