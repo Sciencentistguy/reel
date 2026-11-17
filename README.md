@@ -17,7 +17,7 @@ TV Shows/
       Doctor Who (2005) - s01e01 - Rose.mkv
 ```
 
-## Setup
+## Quickstart
 
 ```sh
 cargo install --path .  # or: nix profile install . (bundles ffprobe)
@@ -87,31 +87,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 }
 ```
 
-### Running from a checkout
-
-For testing without installing or touching your real library, keep a throwaway configuration in
-the git-ignored `dev/` directory. Relative paths in a configuration file are resolved against the
-file's own directory, so everything stays inside `dev/`:
-
-```toml
-# dev/config.toml
-[library]
-database = "library.db"
-movies = "Movies"
-tv = "TV Shows"
-
-[metadata]
-tmdb_api_key = "..."
-tvdb_api_key = "..."
-```
-
-```sh
-export REEL_CONFIG=$PWD/dev/config.toml   # or pass -c dev/config.toml each time
-cargo run -- import -n ~/Downloads/some-show
-nix run . -- stats                        # the same, built by Nix
-```
-
-## Commands
+## Command reference
 
 | Command | Purpose |
 | --- | --- |
@@ -193,7 +169,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, stats |
 
-## Future work
+## Potential future work
 
 - Fetching sidecar subtitles from OpenSubtitles.
 - Integration with [videoconverter](https://github.com/Sciencentistguy/videoconverter).
