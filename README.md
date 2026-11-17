@@ -133,7 +133,7 @@ up once. A confident match is applied automatically; otherwise you choose from t
 search again, enter an ID, use the names as they are, set the edition for every file in a film's
 group (overriding any `{edition-…}` in the names), or skip. `--quiet` never prompts and skips
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
-names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` shows what would happen.
+names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.
 
 Handled along the way:
 

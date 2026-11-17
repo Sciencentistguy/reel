@@ -48,7 +48,7 @@ pub struct Options {
     #[arg(short, long)]
     pub quiet: bool,
     /// Show what would happen without touching files or the database.
-    #[arg(short = 'n', long)]
+    #[arg(short = 'n', long, visible_alias = "dry-run")]
     pub pretend: bool,
     /// Treat every file as this kind instead of guessing from its name.
     #[arg(short, long, value_enum)]

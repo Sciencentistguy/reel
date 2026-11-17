@@ -56,13 +56,13 @@ enum Command {
     /// Rename matching files to follow the current naming scheme.
     #[command(visible_alias = "mv")]
     Move {
-        #[arg(short = 'n', long)]
+        #[arg(short = 'n', long, visible_alias = "dry-run")]
         pretend: bool,
         query: Vec<String>,
     },
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
-        #[arg(short = 'n', long)]
+        #[arg(short = 'n', long, visible_alias = "dry-run")]
         pretend: bool,
         /// Re-probe every matching file, changed or not.
         #[arg(short, long)]
