@@ -55,6 +55,9 @@ pub fn info(library: &Library, query: &Query) -> Result<()> {
         let media = &item.media;
         println!("{item}");
         println!("  path:      {}", item.path.display());
+        if let Some(original) = &item.original_path {
+            println!("  original:  {}", original.display());
+        }
         if let (Some(source), Some(id)) = (&item.source, &item.source_id) {
             println!("  metadata:  {source}-{id}");
         }

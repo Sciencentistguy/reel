@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
     path TEXT NOT NULL UNIQUE,
+    original_path TEXT,
     title TEXT NOT NULL,
     year INTEGER,
     source TEXT,
@@ -64,7 +65,7 @@ CREATE TABLE IF NOT EXISTS subtitle_streams (
 );
 ";
 
-const COLUMNS: &str = "kind, path, title, year, source, source_id, edition, part, season, episode, \
+const COLUMNS: &str = "kind, path, original_path, title, year, source, source_id, edition, part, season, episode, \
     episode_end, episode_title, air_date, date_based, width, height, resolution, video_codec, \
     bit_depth, colour_space, colour_primaries, transfer, hdr, dv_profile, duration, size, mtime, \
     added";
@@ -84,6 +85,9 @@ fn item_from_row(row: &Row) -> rusqlite::Result<Item> {
         id: row.get("id")?,
         kind: Kind::parse(&kind).unwrap_or(Kind::Movie),
         path: PathBuf::from(path),
+        original_path: row
+            .get::<_, Option<String>>("original_path")?
+            .map(PathBuf::from),
         title: row.get("title")?,
         year: row.get("year")?,
         source: row.get("source")?,
@@ -136,7 +140,21 @@ impl Library {
     fn init(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.execute_batch(SCHEMA)?;
+        Self::add_missing_columns(&conn)?;
         Ok(Library { conn })
+    }
+
+    /// Brings a database created by an older version up to the current schema.
+    fn add_missing_columns(conn: &Connection) -> Result<()> {
+        let has_original_path: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('items') WHERE name = 'original_path')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_original_path {
+            conn.execute("ALTER TABLE items ADD COLUMN original_path TEXT", [])?;
+        }
+        Ok(())
     }
 
     pub fn contains_path(&self, path: &Path) -> Result<bool> {
@@ -154,6 +172,7 @@ impl Library {
         let values = params![
             item.kind.as_str(),
             path_text(&item.path),
+            item.original_path.as_deref().map(path_text),
             item.title,
             item.year,
             item.source,
@@ -182,12 +201,12 @@ impl Library {
             item.added,
             item.id,
         ];
-        let placeholders: Vec<String> = (1..=28).map(|n| format!("?{n}")).collect();
+        let placeholders: Vec<String> = (1..=29).map(|n| format!("?{n}")).collect();
         match item.id {
             None => {
                 tx.execute(
                     &format!(
-                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?29)",
+                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?30)",
                         placeholders.join(", ")
                     ),
                     values,
@@ -197,7 +216,7 @@ impl Library {
             Some(_) => {
                 tx.execute(
                     &format!(
-                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?29",
+                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?30",
                         placeholders.join(", ")
                     ),
                     values,
@@ -479,6 +498,27 @@ mod tests {
             .remove(0);
         assert!(!library.has_other_versions(&existing).unwrap());
         library.save(&mut existing).unwrap();
+    }
+
+    #[test]
+    fn original_path_round_trips() {
+        let mut library = Library::in_memory().unwrap();
+        let mut item = sample().remove(0);
+        item.original_path = Some("/downloads/matrix.mkv".into());
+        library.save(&mut item).unwrap();
+        let found = library.query(&Query::parse(&["matrix"]).unwrap()).unwrap();
+        assert_eq!(found[0].original_path, item.original_path);
+    }
+
+    #[test]
+    fn upgrades_database_without_original_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&SCHEMA.replace("    original_path TEXT,\n", ""))
+            .unwrap();
+        let mut library = Library::init(conn).unwrap();
+        let mut item = sample().remove(0);
+        item.original_path = Some("/downloads/matrix.mkv".into());
+        library.save(&mut item).unwrap();
     }
 
     #[test]

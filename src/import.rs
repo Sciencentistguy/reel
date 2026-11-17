@@ -505,6 +505,7 @@ impl Importer<'_> {
                 fileops::prune_empty_dirs(parent, &file.root);
             }
         }
+        item.original_path = Some(file.path.clone());
         item.path = destination;
         item.added = now();
         self.library.save(&mut item)?;

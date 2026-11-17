@@ -82,6 +82,8 @@ pub struct Item {
     pub id: Option<i64>,
     pub kind: Kind,
     pub path: PathBuf,
+    /// Where the file was imported from; unknown for items imported before this was recorded.
+    pub original_path: Option<PathBuf>,
     pub title: String,
     pub year: Option<i32>,
     pub source: Option<String>,
@@ -106,6 +108,7 @@ impl Item {
             id: None,
             kind,
             path,
+            original_path: None,
             title,
             year: None,
             source: None,
@@ -130,6 +133,7 @@ impl Item {
         "id",
         "kind",
         "path",
+        "original_path",
         "title",
         "year",
         "source",
@@ -184,6 +188,11 @@ impl Item {
             "id" => opt(&self.id),
             "kind" => self.kind.to_string(),
             "path" => self.path.display().to_string(),
+            "original_path" => self
+                .original_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
             "title" => self.title.clone(),
             "year" => opt(&self.year),
             "source" => opt(&self.source),
