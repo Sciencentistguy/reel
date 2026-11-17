@@ -330,3 +330,185 @@ impl fmt::Display for Item {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn movie() -> Item {
+        let mut item = Item::new(Kind::Movie, "/m/heat.mkv".into(), "Heat".into());
+        item.year = Some(1995);
+        item.source = Some("tmdb".into());
+        item.source_id = Some("949".into());
+        item.size = 1_000;
+        item.media.resolution = Some("2160p".into());
+        item.media.hdr = Some("DV/HDR10".into());
+        item.media.duration = Some(10_200.4);
+        item.media.audio = vec![
+            AudioStream {
+                codec: Some("truehd".into()),
+                channels: Some(8),
+                atmos: true,
+                ..AudioStream::default()
+            },
+            AudioStream {
+                codec: Some("ac3".into()),
+                channels: Some(6),
+                ..AudioStream::default()
+            },
+        ];
+        item.media.subtitles = vec![SubtitleStream {
+            language: Some("eng".into()),
+            forced: true,
+            ..SubtitleStream::default()
+        }];
+        item
+    }
+
+    fn episode() -> Item {
+        let mut item = Item::new(Kind::Episode, "/tv/rose.mkv".into(), "Doctor Who".into());
+        item.season = Some(1);
+        item.episode = Some(1);
+        item
+    }
+
+    #[test]
+    fn kinds_round_trip_through_text() {
+        for kind in [Kind::Movie, Kind::Episode] {
+            assert_eq!(Kind::parse(kind.as_str()), Some(kind));
+            assert_eq!(kind.to_string(), kind.as_str());
+        }
+        assert_eq!(Kind::parse("series"), None);
+    }
+
+    #[test]
+    fn fields_render_as_text() {
+        let item = movie();
+        assert_eq!(item.field("title").unwrap(), "Heat");
+        assert_eq!(item.field("year").unwrap(), "1995");
+        assert_eq!(item.field("kind").unwrap(), "movie");
+        assert_eq!(item.field("source_id").unwrap(), "949");
+        assert_eq!(item.field("duration").unwrap(), "10200");
+        assert_eq!(item.field("audio_codec").unwrap(), "truehd, ac3");
+        assert_eq!(item.field("audio_channels").unwrap(), "8, 6");
+        assert_eq!(item.field("atmos").unwrap(), "true");
+        assert_eq!(item.field("subtitle_forced").unwrap(), "true");
+        assert_eq!(item.field("subtitle_sdh").unwrap(), "false");
+        assert_eq!(item.field("season").unwrap(), "", "unset fields are empty");
+        assert_eq!(item.field("nonsense"), None);
+    }
+
+    #[test]
+    fn every_listed_field_resolves() {
+        let item = Item::new(Kind::Movie, "/m/x.mkv".into(), "X".into());
+        for name in Item::FIELDS {
+            assert!(item.field(name).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn templates_expand_bare_and_braced_references() {
+        let item = movie();
+        assert_eq!(item.format("$title ($year)"), "Heat (1995)");
+        assert_eq!(item.format("${title}s"), "Heats");
+        assert_eq!(item.format("$title$year"), "Heat1995");
+        assert_eq!(item.format("$resolution/$hdr"), "2160p/DV/HDR10");
+        assert_eq!(item.format("no references"), "no references");
+        assert_eq!(item.format(""), "");
+    }
+
+    #[test]
+    fn templates_keep_what_they_cannot_expand() {
+        let item = movie();
+        assert_eq!(item.format("$nonsense"), "$nonsense");
+        assert_eq!(item.format("costs $5"), "costs $5");
+        assert_eq!(item.format("${title"), "${title");
+        assert_eq!(item.format("trailing $"), "trailing $");
+        assert_eq!(item.format("$$title"), "$Heat");
+    }
+
+    #[test]
+    fn episode_codes() {
+        let mut item = episode();
+        assert_eq!(item.episode_code().unwrap(), "s01e01");
+        item.episode_end = Some(1);
+        assert_eq!(
+            item.episode_code().unwrap(),
+            "s01e01",
+            "a one-episode range"
+        );
+        item.episode_end = Some(3);
+        assert_eq!(item.episode_code().unwrap(), "s01e01-e03");
+        item.season = Some(12);
+        item.episode = Some(104);
+        item.episode_end = None;
+        assert_eq!(item.episode_code().unwrap(), "s12e104");
+
+        item.date_based = true;
+        item.air_date = Some("2011-11-15".into());
+        assert_eq!(item.episode_code().unwrap(), "2011-11-15");
+
+        assert_eq!(movie().episode_code(), None);
+        item.date_based = false;
+        item.season = None;
+        assert_eq!(item.episode_code(), None, "needs a season and an episode");
+    }
+
+    #[test]
+    fn versions_of_the_same_work() {
+        let a = movie();
+        let mut b = movie();
+        b.path = "/m/heat-1080p.mkv".into();
+        b.size = 500;
+        b.media.resolution = Some("1080p".into());
+        assert!(a.same_work(&b));
+        assert!(!a.is_duplicate_of(&b), "different size and resolution");
+
+        let mut c = a.clone();
+        c.path = "/m/copy.mkv".into();
+        assert!(a.is_duplicate_of(&c));
+
+        let mut cut = movie();
+        cut.edition = Some("Director's Cut".into());
+        assert!(!a.same_work(&cut));
+        let mut part = movie();
+        part.part = Some(2);
+        assert!(!a.same_work(&part));
+        let mut remake = movie();
+        remake.year = Some(2021);
+        assert!(!a.same_work(&remake));
+        let mut other_id = movie();
+        other_id.source_id = Some("1".into());
+        assert!(!a.same_work(&other_id));
+    }
+
+    #[test]
+    fn episodes_of_a_show_are_distinct_works() {
+        let one = episode();
+        let mut two = episode();
+        two.episode = Some(2);
+        assert!(!one.same_work(&two));
+        let mut film = movie();
+        film.title = one.title.clone();
+        assert!(!one.same_work(&film));
+    }
+
+    #[test]
+    fn display_summarises_an_item() {
+        let mut item = movie();
+        assert_eq!(item.to_string(), "Heat (1995) [2160p DV/HDR10]");
+        item.edition = Some("Final Cut".into());
+        item.part = Some(1);
+        assert_eq!(
+            item.to_string(),
+            "Heat (1995) [Final Cut] (part 1) [2160p DV/HDR10]"
+        );
+
+        let mut show = episode();
+        show.episode_title = Some("Rose".into());
+        show.media.hdr = Some("SDR".into());
+        assert_eq!(show.to_string(), "Doctor Who - s01e01 - Rose");
+        show.media.resolution = Some("1080p".into());
+        assert_eq!(show.to_string(), "Doctor Who - s01e01 - Rose [1080p]");
+    }
+}

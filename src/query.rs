@@ -208,3 +208,221 @@ impl Query {
         &self.params
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::library::Library;
+    use crate::model::{AudioStream, Item, Kind, SubtitleStream};
+
+    fn library() -> Library {
+        let mut matrix = Item::new(Kind::Movie, "/m/matrix.mkv".into(), "The Matrix".into());
+        matrix.year = Some(1999);
+        matrix.edition = Some("Final Cut".into());
+        matrix.size = 5_000;
+        matrix.media.resolution = Some("2160p".into());
+        matrix.media.width = Some(3840);
+        matrix.media.hdr = Some("DV/HDR10+/HDR10".into());
+        matrix.media.audio = vec![
+            AudioStream {
+                codec: Some("truehd".into()),
+                channels: Some(8),
+                atmos: true,
+                ..AudioStream::default()
+            },
+            AudioStream {
+                codec: Some("ac3".into()),
+                channels: Some(6),
+                language: Some("eng".into()),
+                ..AudioStream::default()
+            },
+        ];
+        matrix.media.subtitles = vec![SubtitleStream {
+            language: Some("eng".into()),
+            forced: true,
+            ..SubtitleStream::default()
+        }];
+
+        let mut heat = Item::new(Kind::Movie, "/m/heat.mkv".into(), "Heat".into());
+        heat.year = Some(1995);
+        heat.size = 3_000;
+        heat.media.resolution = Some("1080p".into());
+        heat.media.hdr = Some("HDR10".into());
+        heat.media.audio = vec![AudioStream {
+            codec: Some("dts".into()),
+            channels: Some(6),
+            ..AudioStream::default()
+        }];
+
+        let mut rose = Item::new(Kind::Episode, "/tv/rose.mkv".into(), "Doctor Who".into());
+        rose.year = Some(2005);
+        rose.season = Some(1);
+        rose.episode = Some(1);
+        rose.episode_title = Some("Rose".into());
+        rose.media.resolution = Some("1080p".into());
+        rose.media.hdr = Some("SDR".into());
+
+        let untitled = Item::new(Kind::Movie, "/m/untitled.mkv".into(), "Untitled".into());
+
+        let mut library = Library::in_memory().unwrap();
+        for mut item in [matrix, heat, rose, untitled] {
+            library.save(&mut item).unwrap();
+        }
+        library
+    }
+
+    fn matching(terms: &[&str]) -> Vec<String> {
+        let query = Query::parse(terms).unwrap();
+        let mut titles: Vec<_> = library()
+            .query(&query)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    fn error(terms: &[&str]) -> String {
+        Query::parse(terms).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert_eq!(matching(&[]).len(), 4);
+        assert_eq!(Query::default().where_clause(), "1");
+        assert!(Query::default().params().is_empty());
+    }
+
+    #[test]
+    fn bare_words_match_titles_and_episode_titles_ignoring_case() {
+        assert_eq!(matching(&["matrix"]), ["The Matrix"]);
+        assert_eq!(matching(&["HEAT"]), ["Heat"]);
+        assert_eq!(matching(&["rose"]), ["Doctor Who"]);
+        assert_eq!(matching(&["who", "rose"]), ["Doctor Who"]);
+        assert!(matching(&["nonexistent"]).is_empty());
+    }
+
+    #[test]
+    fn terms_are_anded() {
+        assert_eq!(matching(&["kind:movie", "year:1990..1999"]).len(), 2);
+        assert_eq!(matching(&["kind:movie", "heat"]), ["Heat"]);
+        assert!(matching(&["heat", "matrix"]).is_empty());
+    }
+
+    #[test]
+    fn unknown_fields_fall_back_to_a_title_search() {
+        assert!(matching(&["nosuchfield:value"]).is_empty());
+        let query = Query::parse(&["nosuchfield:value"]).unwrap();
+        assert_eq!(query.params(), [Value::Text("nosuchfield:value".into())]);
+    }
+
+    #[test]
+    fn text_fields_match_substrings_or_exactly() {
+        assert_eq!(matching(&["title:matr"]), ["The Matrix"]);
+        assert_eq!(matching(&["title:=heat"]), ["Heat"]);
+        assert!(matching(&["title:=hea"]).is_empty());
+        assert_eq!(matching(&["edition:final"]), ["The Matrix"]);
+        assert_eq!(matching(&["resolution:=1080p"]), ["Doctor Who", "Heat"]);
+    }
+
+    #[test]
+    fn negation_excludes_matches_and_keeps_nulls() {
+        assert_eq!(matching(&["^kind:movie"]), ["Doctor Who"]);
+        assert_eq!(matching(&["^matrix", "kind:movie"]), ["Heat", "Untitled"]);
+        assert_eq!(
+            matching(&["kind:movie", "^year:1999"]),
+            ["Heat", "Untitled"],
+            "a missing year is not 1999"
+        );
+        assert_eq!(matching(&["^edition:final"]).len(), 3);
+    }
+
+    #[test]
+    fn numbers_match_exactly_and_in_ranges() {
+        assert_eq!(matching(&["year:1999"]), ["The Matrix"]);
+        assert_eq!(matching(&["year:1990..1999"]), ["Heat", "The Matrix"]);
+        assert_eq!(matching(&["year:2000.."]), ["Doctor Who"]);
+        assert_eq!(matching(&["year:..1995"]), ["Heat"]);
+        assert_eq!(matching(&["year:.."]).len(), 3, "any known year");
+        assert_eq!(matching(&["size:3000..5000"]), ["Heat", "The Matrix"]);
+        assert_eq!(matching(&["season:1", "episode:1"]), ["Doctor Who"]);
+        assert_eq!(matching(&["width:3840"]), ["The Matrix"]);
+    }
+
+    #[test]
+    fn numbers_must_parse() {
+        assert!(error(&["year:abc"]).contains("not a number"));
+        assert!(error(&["year:1990..abc"]).contains("not a number"));
+        assert!(error(&["year:abc.."]).contains("year"));
+    }
+
+    #[test]
+    fn list_fields_match_whole_elements() {
+        assert_eq!(matching(&["hdr:hdr10"]), ["Heat", "The Matrix"]);
+        assert_eq!(matching(&["hdr:hdr10+"]), ["The Matrix"]);
+        assert_eq!(matching(&["hdr:dv"]), ["The Matrix"]);
+        assert_eq!(matching(&["hdr:sdr"]), ["Doctor Who"]);
+        assert!(matching(&["hdr:hdr"]).is_empty());
+        assert_eq!(matching(&["hdr:hdr10", "^hdr:hdr10+"]), ["Heat"]);
+    }
+
+    #[test]
+    fn stream_fields_match_if_any_stream_matches() {
+        assert_eq!(matching(&["audio_codec:truehd"]), ["The Matrix"]);
+        assert_eq!(matching(&["audio_codec:ac3"]), ["The Matrix"]);
+        assert_eq!(matching(&["audio_channels:6"]), ["Heat", "The Matrix"]);
+        assert_eq!(matching(&["audio_channels:7.."]), ["The Matrix"]);
+        assert_eq!(matching(&["audio_language:eng"]), ["The Matrix"]);
+        assert_eq!(matching(&["subtitle_language:eng"]), ["The Matrix"]);
+    }
+
+    #[test]
+    fn stream_terms_may_match_different_streams() {
+        assert_eq!(
+            matching(&["audio_codec:truehd", "audio_channels:6"]),
+            ["The Matrix"]
+        );
+    }
+
+    #[test]
+    fn flags_accept_several_spellings() {
+        for spelling in ["true", "TRUE", "yes", "1"] {
+            assert_eq!(matching(&[&format!("atmos:{spelling}")]), ["The Matrix"]);
+        }
+        for spelling in ["false", "no", "0"] {
+            assert_eq!(
+                matching(&[&format!("atmos:{spelling}")]),
+                ["Heat", "The Matrix"],
+                "a false flag finds files with a stream that lacks it"
+            );
+        }
+        assert_eq!(matching(&["subtitle_forced:true"]), ["The Matrix"]);
+        assert!(error(&["atmos:maybe"]).contains("expected true or false"));
+    }
+
+    #[test]
+    fn negated_flags_find_files_without_any() {
+        assert_eq!(
+            matching(&["kind:movie", "^atmos:true"]),
+            ["Heat", "Untitled"]
+        );
+        assert_eq!(matching(&["^subtitle_forced:true", "kind:movie"]).len(), 2);
+    }
+
+    #[test]
+    fn terms_with_colons_in_values_keep_them() {
+        assert!(matching(&["title:a:b"]).is_empty());
+    }
+
+    #[test]
+    fn every_query_field_is_documented_by_fields() {
+        for name in Item::FIELDS {
+            let queryable = field(name).is_some();
+            assert!(
+                queryable || *name == "original_path",
+                "{name} cannot be queried"
+            );
+        }
+    }
+}

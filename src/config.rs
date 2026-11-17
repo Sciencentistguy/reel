@@ -254,4 +254,139 @@ mod tests {
         std::fs::write(&path, "[library]\nmovie = \"x\"\n").unwrap();
         assert!(Config::load(&path).is_err());
     }
+
+    fn load(toml: &str) -> (tempfile::TempDir, Config) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        let config = Config::load(&path).unwrap();
+        (dir, config)
+    }
+
+    #[test]
+    fn a_missing_file_gives_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&dir.path().join("absent.toml")).unwrap();
+        assert_eq!(config.import.operation, Operation::Copy);
+        assert!(config.import.subtitles && config.import.probe && !config.import.timid);
+        assert!(config.naming.id_tags);
+        assert_eq!(config.metadata.tv_source, TvSource::Tvdb);
+        assert_eq!(config.import.strong_match, 0.08);
+    }
+
+    #[test]
+    fn the_default_configuration_loads_back_unchanged() {
+        let defaults = Config::default();
+        let (_dir, loaded) = load(&defaults.to_toml().unwrap());
+        assert_eq!(loaded.library.database, defaults.library.database);
+        assert_eq!(loaded.library.movies, defaults.library.movies);
+        assert_eq!(loaded.import.operation, defaults.import.operation);
+        assert_eq!(loaded.metadata.tmdb_language, "en-US");
+        assert_eq!(loaded.metadata.tvdb_language, "eng");
+    }
+
+    #[test]
+    fn partial_files_fill_in_the_rest_with_defaults() {
+        let (_dir, config) = load("[import]\noperation = \"hardlink\"\n");
+        assert_eq!(config.import.operation, Operation::Hardlink);
+        assert!(config.import.subtitles);
+        assert_eq!(config.metadata.tv_source, TvSource::Tvdb);
+    }
+
+    #[test]
+    fn enumerations_parse_from_lowercase_names() {
+        for (name, operation) in [
+            ("copy", Operation::Copy),
+            ("move", Operation::Move),
+            ("hardlink", Operation::Hardlink),
+            ("symlink", Operation::Symlink),
+            ("reflink", Operation::Reflink),
+        ] {
+            let (_dir, config) = load(&format!("[import]\noperation = \"{name}\"\n"));
+            assert_eq!(config.import.operation, operation);
+        }
+        let (_dir, config) = load("[metadata]\ntv_source = \"tmdb\"\n");
+        assert_eq!(config.metadata.tv_source, TvSource::Tmdb);
+    }
+
+    #[test]
+    fn invalid_values_and_syntax_are_rejected() {
+        for bad in [
+            "[import]\noperation = \"teleport\"\n",
+            "[metadata]\ntv_source = \"imdb\"\n",
+            "[import]\nstrong_match = \"high\"\n",
+            "[nonsense]\n",
+            "this is not toml",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, bad).unwrap();
+            let error = Config::load(&path).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("invalid config file"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_expands_to_the_home_directory() {
+        let Some(home) = dirs::home_dir() else { return };
+        let (_dir, config) = load("[library]\nmovies = \"~/Films\"\n");
+        assert_eq!(config.library.movies, home.join("Films"));
+    }
+
+    #[test]
+    fn relative_library_paths_follow_the_config_file() {
+        let (dir, config) = load("[library]\ndatabase = \"db/library.db\"\ntv = \"Shows\"\n");
+        assert_eq!(config.library.database, dir.path().join("db/library.db"));
+        assert_eq!(config.library.tv, dir.path().join("Shows"));
+    }
+
+    #[test]
+    fn inline_keys_are_kept_unless_the_environment_overrides_them() {
+        let (_dir, config) = load("[metadata]\ntmdb_api_key = \"inline\"\n");
+        if std::env::var_os("TMDB_API_KEY").is_none() {
+            assert_eq!(config.metadata.tmdb_api_key, "inline");
+        }
+    }
+
+    #[test]
+    fn an_inline_key_wins_over_a_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tvdb.key"), "from-file\n").unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[metadata]\ntvdb_api_key = \"inline\"\ntvdb_api_key_file = \"tvdb.key\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        if std::env::var_os("TVDB_API_KEY").is_none() {
+            assert_eq!(config.metadata.tvdb_api_key, "inline");
+        }
+    }
+
+    #[test]
+    fn an_unreadable_key_file_does_not_break_loading() {
+        let (_dir, config) = load("[metadata]\ntmdb_api_key_file = \"missing.key\"\n");
+        if std::env::var_os("TMDB_API_KEY").is_none() {
+            assert!(config.metadata.tmdb_api_key.is_empty());
+        }
+    }
+
+    #[test]
+    fn redaction_hides_set_keys_without_changing_the_original() {
+        let (_dir, config) = load("[metadata]\ntmdb_api_key = \"secret\"\n");
+        let redacted = config.redacted();
+        let text = redacted.to_toml().unwrap();
+        assert!(!text.contains("secret"));
+        assert!(text.contains("tmdb_api_key = \"<redacted>\""));
+        assert_ne!(redacted.metadata.tmdb_api_key, "");
+        assert_ne!(config.metadata.tmdb_api_key, "<redacted>");
+        assert_eq!(
+            redacted.metadata.tvdb_api_key.is_empty(),
+            config.metadata.tvdb_api_key.is_empty()
+        );
+    }
 }
