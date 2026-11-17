@@ -17,6 +17,9 @@ pub struct Candidate {
     pub id: String,
     pub title: String,
     pub year: Option<i32>,
+    /// The title in its original language, when it differs from `title`.
+    pub original_title: Option<String>,
+    pub overview: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -80,6 +83,15 @@ pub(crate) fn year_of(date: Option<&str>) -> Option<i32> {
     date?.get(..4)?.parse().ok()
 }
 
+/// Returns `text` unless it is empty or the same as `title`.
+pub(crate) fn distinct_from(title: &str, text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.is_empty() && text != title)
+}
+
+pub(crate) fn non_empty(text: Option<String>) -> Option<String> {
+    text.filter(|text| !text.is_empty())
+}
+
 fn normalise(title: &str) -> String {
     let lowered = title.to_lowercase().replace('&', " and ");
     let kept: String = lowered
@@ -139,6 +151,8 @@ mod tests {
             id: "1".into(),
             title: title.into(),
             year: Some(year),
+            original_title: None,
+            overview: None,
         }
     }
 

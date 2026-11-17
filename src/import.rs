@@ -236,6 +236,28 @@ fn describe(title: &str, year: Option<i32>) -> String {
     }
 }
 
+const OVERVIEW_WIDTH: usize = 200;
+
+fn print_details(candidate: &Candidate) {
+    if let Some(original) = &candidate.original_title {
+        println!("     Original title: {original}");
+    }
+    if let Some(overview) = &candidate.overview {
+        println!("     {}", truncate(overview, OVERVIEW_WIDTH));
+    }
+}
+
+/// Collapses whitespace and cuts `text` at a word boundary within `width` characters.
+fn truncate(text: &str, width: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= width {
+        return text;
+    }
+    let cut: String = text.chars().take(width).collect();
+    let kept = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
+    format!("{}…", kept.trim_end_matches([',', ';', ':', '.', '-']))
+}
+
 fn match_percent(distance: f64) -> String {
     let colour = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     colour_percent(((1.0 - distance) * 100.0).round(), colour)
@@ -329,6 +351,7 @@ fn decide(
                 candidate.id,
                 match_percent(*distance)
             );
+            print_details(candidate);
         }
         loop {
             let default = if shown.is_empty() {
@@ -753,6 +776,12 @@ mod tests {
         assert_eq!(code(75.0), "\x1b[33m75%\x1b[0m");
         assert_eq!(code(66.0), "\x1b[31m66%\x1b[0m");
         assert_eq!(colour_percent(98.0, false), "98%");
+    }
+
+    #[test]
+    fn truncates_overviews_at_word_boundaries() {
+        assert_eq!(truncate("A  short\nplot.", 50), "A short plot.");
+        assert_eq!(truncate("one two, three four", 10), "one two…");
     }
 
     fn episodes() -> Vec<EpisodeInfo> {

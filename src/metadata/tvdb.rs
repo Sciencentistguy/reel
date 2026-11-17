@@ -7,7 +7,9 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{Candidate, EpisodeInfo, ShowSource, agent, read_json, year_of};
+use super::{
+    Candidate, EpisodeInfo, ShowSource, agent, distinct_from, non_empty, read_json, year_of,
+};
 use crate::config::MetadataConfig;
 
 const BASE: &str = "https://api4.thetvdb.com/v4";
@@ -41,8 +43,11 @@ struct SearchResult {
     name: String,
     year: Option<String>,
     first_air_time: Option<String>,
+    overview: Option<String>,
     #[serde(default)]
     translations: Option<HashMap<String, String>>,
+    #[serde(default)]
+    overviews: Option<HashMap<String, String>>,
 }
 
 #[derive(Deserialize)]
@@ -52,11 +57,13 @@ struct Series {
     year: Option<String>,
     #[serde(rename = "firstAired")]
     first_aired: Option<String>,
+    overview: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Translation {
     name: Option<String>,
+    overview: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -141,10 +148,16 @@ impl ShowSource for Tvdb {
                     .translations
                     .and_then(|mut names| names.remove(&self.language))
                     .filter(|name| !name.is_empty());
+                let translated_overview = result
+                    .overviews
+                    .and_then(|mut overviews| overviews.remove(&self.language));
+                let title = translated.unwrap_or_else(|| result.name.clone());
                 Candidate {
                     source: "tvdb",
                     id: result.tvdb_id,
-                    title: translated.unwrap_or(result.name),
+                    original_title: distinct_from(&title, Some(result.name)),
+                    overview: non_empty(translated_overview).or(non_empty(result.overview)),
+                    title,
                     year: result
                         .year
                         .and_then(|year| year.parse().ok())
@@ -157,15 +170,22 @@ impl ShowSource for Tvdb {
     fn show(&self, id: &str) -> Result<Candidate> {
         let series: Series = self.get(&format!("/series/{id}"), &[])?.data;
         // The base record carries the original-language name; prefer the configured language.
-        let translated = self
+        let translation = self
             .get::<Translation>(&format!("/series/{id}/translations/{}", self.language), &[])
             .ok()
-            .and_then(|translation| translation.data.name)
+            .map(|translation| translation.data);
+        let translated = translation
+            .as_ref()
+            .and_then(|translation| translation.name.clone())
             .filter(|name| !name.is_empty());
+        let translated_overview = translation.and_then(|translation| translation.overview);
+        let title = translated.unwrap_or_else(|| series.name.clone());
         Ok(Candidate {
             source: "tvdb",
             id: series.id.to_string(),
-            title: translated.unwrap_or(series.name),
+            original_title: distinct_from(&title, Some(series.name)),
+            overview: non_empty(translated_overview).or(non_empty(series.overview)),
+            title,
             year: series
                 .year
                 .and_then(|year| year.parse().ok())

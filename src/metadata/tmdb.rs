@@ -4,7 +4,10 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{Candidate, EpisodeInfo, MovieSource, ShowSource, agent, read_json, year_of};
+use super::{
+    Candidate, EpisodeInfo, MovieSource, ShowSource, agent, distinct_from, non_empty, read_json,
+    year_of,
+};
 use crate::config::MetadataConfig;
 
 const BASE: &str = "https://api.themoviedb.org/3";
@@ -24,6 +27,8 @@ struct Page<T> {
 struct Movie {
     id: u64,
     title: String,
+    original_title: Option<String>,
+    overview: Option<String>,
     release_date: Option<String>,
 }
 
@@ -31,6 +36,8 @@ struct Movie {
 struct Show {
     id: u64,
     name: String,
+    original_name: Option<String>,
+    overview: Option<String>,
     first_air_date: Option<String>,
     #[serde(default)]
     seasons: Vec<SeasonSummary>,
@@ -61,6 +68,8 @@ impl From<Movie> for Candidate {
             source: "tmdb",
             id: movie.id.to_string(),
             year: year_of(movie.release_date.as_deref()),
+            original_title: distinct_from(&movie.title, movie.original_title),
+            overview: non_empty(movie.overview),
             title: movie.title,
         }
     }
@@ -72,6 +81,8 @@ impl From<Show> for Candidate {
             source: "tmdb",
             id: show.id.to_string(),
             year: year_of(show.first_air_date.as_deref()),
+            original_title: distinct_from(&show.name, show.original_name),
+            overview: non_empty(show.overview),
             title: show.name,
         }
     }
