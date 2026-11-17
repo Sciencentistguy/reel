@@ -939,4 +939,747 @@ mod tests {
             Path::new("/in")
         ));
     }
+
+    use std::cell::{Cell, RefCell};
+
+    use anyhow::anyhow;
+
+    fn candidate(title: &str, year: i32, id: &str) -> Candidate {
+        Candidate {
+            source: "tmdb",
+            id: id.into(),
+            title: title.into(),
+            year: Some(year),
+            url: String::new(),
+            original_title: None,
+            overview: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct StubMovies {
+        results: Vec<Candidate>,
+        by_id: Option<Candidate>,
+        fail_search: bool,
+        searches: Cell<usize>,
+        lookups: RefCell<Vec<String>>,
+    }
+
+    impl MovieSource for StubMovies {
+        fn search_movies(&self, _title: &str, _year: Option<i32>) -> Result<Vec<Candidate>> {
+            self.searches.set(self.searches.get() + 1);
+            if self.fail_search {
+                return Err(anyhow!("search unavailable"));
+            }
+            Ok(self.results.clone())
+        }
+
+        fn movie(&self, id: &str) -> Result<Candidate> {
+            self.lookups.borrow_mut().push(id.to_string());
+            self.by_id.clone().ok_or_else(|| anyhow!("not found"))
+        }
+    }
+
+    #[derive(Default)]
+    struct StubShows {
+        fail: bool,
+        requested: RefCell<Vec<Option<u32>>>,
+    }
+
+    impl ShowSource for StubShows {
+        fn name(&self) -> &'static str {
+            "tvdb"
+        }
+
+        fn search_shows(&self, _: &str, _: Option<i32>) -> Result<Vec<Candidate>> {
+            Ok(Vec::new())
+        }
+
+        fn show(&self, _: &str) -> Result<Candidate> {
+            Err(anyhow!("unused"))
+        }
+
+        fn episodes(&self, _: &str, season: Option<u32>) -> Result<Vec<EpisodeInfo>> {
+            self.requested.borrow_mut().push(season);
+            if self.fail {
+                return Err(anyhow!("unavailable"));
+            }
+            Ok(vec![EpisodeInfo {
+                season: season.unwrap_or(1),
+                number: 1,
+                title: Some("Title".into()),
+                air_date: None,
+            }])
+        }
+    }
+
+    fn pending(path: &str) -> Pending {
+        let path = PathBuf::from(path);
+        Pending {
+            root: PathBuf::from("/in"),
+            parsed: parse::parse(&path),
+            path,
+        }
+    }
+
+    fn group_of(path: &str) -> Group {
+        group(vec![pending(path)]).remove(0)
+    }
+
+    fn decision(
+        group: &Group,
+        source: &StubMovies,
+        timid: bool,
+        interactive: bool,
+    ) -> Result<Decision> {
+        decide(
+            group,
+            &Lookup::Movie(source),
+            &Library::in_memory()?,
+            0.08,
+            interactive,
+            timid,
+            &mut None,
+        )
+    }
+
+    #[test]
+    fn describes_titles_with_optional_years() {
+        assert_eq!(describe("Heat", Some(1995)), "Heat (1995)");
+        assert_eq!(describe("Heat", None), "Heat");
+    }
+
+    #[test]
+    fn groups_files_of_the_same_work() {
+        let groups = group(vec![
+            pending("/in/Heat.1995.1080p.mkv"),
+            pending("/in/heat 1995 2160p.mkv"),
+            pending("/in/Heat.1996.mkv"),
+            pending("/in/Heat.S01E01.mkv"),
+            pending("/in/Heat.S01E02.mkv"),
+        ]);
+        let sizes: Vec<_> = groups
+            .iter()
+            .map(|group| (group.kind, group.year, group.files.len()))
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                (Kind::Movie, Some(1995), 2),
+                (Kind::Movie, Some(1996), 1),
+                (Kind::Episode, None, 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn id_tags_group_files_regardless_of_their_titles() {
+        let groups = group(vec![
+            pending("/in/Heat {tmdb-949}.mkv"),
+            pending("/in/Hete {tmdb-949}.mkv"),
+            pending("/in/Heat {tmdb-1}.mkv"),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].files.len(), 2);
+        assert_eq!(groups[0].id_hint, Some(("tmdb".into(), "949".into())));
+    }
+
+    #[test]
+    fn base_items_take_identity_from_the_match() {
+        let group = group_of("/in/Heat.1996.mkv");
+        let file = &group.files[0];
+        let plain = base_item(&group, file, None);
+        assert_eq!((plain.title.as_str(), plain.year), ("Heat", Some(1996)));
+        assert_eq!(plain.source, None);
+
+        let matched = base_item(&group, file, Some(&candidate("Heat", 1995, "949")));
+        assert_eq!(matched.year, Some(1995));
+        assert_eq!(matched.source.as_deref(), Some("tmdb"));
+        assert_eq!(matched.source_id.as_deref(), Some("949"));
+
+        let mut undated = candidate("Heat", 1995, "949");
+        undated.year = None;
+        assert_eq!(base_item(&group, file, Some(&undated)).year, Some(1996));
+    }
+
+    #[test]
+    fn a_clear_match_is_used_unprompted() {
+        let source = StubMovies {
+            results: vec![candidate("Heat", 1995, "949"), candidate("Heat", 1986, "2")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995.mkv");
+        match decision(&group, &source, false, false).unwrap() {
+            Decision::Use(found) => assert_eq!(found.id, "949"),
+            _ => panic!("expected the 1995 film"),
+        }
+    }
+
+    #[test]
+    fn ambiguous_matches_are_skipped_when_not_interactive() {
+        let source = StubMovies {
+            results: vec![candidate("Dune", 2021, "1"), candidate("Dune", 1984, "2")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Dune.mkv");
+        assert!(matches!(
+            decision(&group, &source, false, false).unwrap(),
+            Decision::Skip
+        ));
+    }
+
+    #[test]
+    fn timid_mode_never_applies_a_match_unprompted() {
+        let source = StubMovies {
+            results: vec![candidate("Heat", 1995, "949")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995.mkv");
+        assert!(matches!(
+            decision(&group, &source, true, false).unwrap(),
+            Decision::Skip
+        ));
+    }
+
+    #[test]
+    fn no_candidates_means_skipping() {
+        let group = group_of("/in/Heat.1995.mkv");
+        assert!(matches!(
+            decision(&group, &StubMovies::default(), false, false).unwrap(),
+            Decision::Skip
+        ));
+    }
+
+    #[test]
+    fn a_weak_match_is_not_applied() {
+        let source = StubMovies {
+            results: vec![candidate("Something Else Entirely", 1995, "7")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995.mkv");
+        assert!(matches!(
+            decision(&group, &source, false, false).unwrap(),
+            Decision::Skip
+        ));
+    }
+
+    #[test]
+    fn search_failures_propagate() {
+        let source = StubMovies {
+            fail_search: true,
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995.mkv");
+        let error = decision(&group, &source, false, false).err().unwrap();
+        assert!(error.to_string().contains("search unavailable"));
+    }
+
+    #[test]
+    fn id_tags_skip_the_search() {
+        let source = StubMovies {
+            by_id: Some(candidate("Heat", 1995, "949")),
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat {tmdb-949}.mkv");
+        match decision(&group, &source, false, false).unwrap() {
+            Decision::Use(found) => assert_eq!(found.id, "949"),
+            _ => panic!("expected a direct match"),
+        }
+        assert_eq!(source.lookups.borrow().as_slice(), ["949"]);
+        assert_eq!(source.searches.get(), 0);
+    }
+
+    #[test]
+    fn timid_mode_still_searches_when_an_id_tag_is_present() {
+        let source = StubMovies {
+            by_id: Some(candidate("Heat", 1995, "949")),
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat {tmdb-949}.mkv");
+        assert!(matches!(
+            decision(&group, &source, true, false).unwrap(),
+            Decision::Skip
+        ));
+        assert_eq!(source.searches.get(), 1);
+    }
+
+    #[test]
+    fn a_failed_id_lookup_falls_back_to_searching() {
+        let source = StubMovies {
+            results: vec![candidate("Heat", 1995, "949")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995 {tmdb-1}.mkv");
+        match decision(&group, &source, false, false).unwrap() {
+            Decision::Use(found) => assert_eq!(found.id, "949"),
+            _ => panic!("expected the search result"),
+        }
+        assert_eq!(source.lookups.borrow().as_slice(), ["1"]);
+    }
+
+    #[test]
+    fn id_tags_for_another_source_are_ignored() {
+        let source = StubMovies {
+            results: vec![candidate("Heat", 1995, "949")],
+            ..StubMovies::default()
+        };
+        let group = group_of("/in/Heat.1995 {tvdb-1}.mkv");
+        assert!(matches!(
+            decision(&group, &source, false, false).unwrap(),
+            Decision::Use(_)
+        ));
+        assert!(source.lookups.borrow().is_empty());
+    }
+
+    #[test]
+    fn episodes_are_fetched_once_per_season() {
+        let shows = StubShows::default();
+        let files = [
+            pending("/in/Show.S01E01.mkv"),
+            pending("/in/Show.S01E02.mkv"),
+            pending("/in/Show.S03E01.mkv"),
+        ];
+        let episodes = fetch_episodes(&shows, "1", &files);
+        assert_eq!(*shows.requested.borrow(), [Some(1), Some(3)]);
+        assert_eq!(episodes.len(), 2);
+    }
+
+    #[test]
+    fn date_based_shows_fetch_the_whole_episode_list() {
+        let shows = StubShows::default();
+        let files = [
+            pending("/in/Show.2011.11.15.mkv"),
+            pending("/in/Show.S01E01.mkv"),
+        ];
+        fetch_episodes(&shows, "1", &files);
+        assert_eq!(*shows.requested.borrow(), [None]);
+    }
+
+    #[test]
+    fn episode_fetch_failures_leave_an_empty_list() {
+        let shows = StubShows {
+            fail: true,
+            ..StubShows::default()
+        };
+        let files = [pending("/in/Show.S01E01.mkv")];
+        assert!(fetch_episodes(&shows, "1", &files).is_empty());
+    }
+
+    #[test]
+    fn unlisted_episodes_are_imported_without_a_title() {
+        let item = applied("Show S05E09 Parsed Title", Some(&episodes())).unwrap();
+        assert_eq!(item.episode_title, None);
+        assert_eq!(item.episode_code().as_deref(), Some("s05e09"));
+    }
+
+    #[test]
+    fn files_without_episode_numbers_cannot_be_placed() {
+        assert!(applied("Show Special Feature", Some(&episodes())).is_none());
+    }
+
+    fn write(dir: &Path, relative: &str, contents: &str) -> PathBuf {
+        let path = dir.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn collection_finds_videos_and_skips_samples_extras_and_other_files() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "Film/Film.2000.mkv",
+            "Film/Film.2000.en.srt",
+            "Film/Film.nfo",
+            "Film/Sample/film-sample.mkv",
+            "Film/Featurettes/making-of.mkv",
+            "More/Thing.2001.MP4",
+        ] {
+            write(dir.path(), name, "");
+        }
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let found = collect(&[dir.path().to_path_buf()]).unwrap();
+        let names: Vec<_> = found
+            .iter()
+            .map(|(path, _)| path.strip_prefix(&root).unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Film/Film.2000.mkv", "More/Thing.2001.MP4"]);
+        assert!(found.iter().all(|(_, found_root)| *found_root == root));
+    }
+
+    #[test]
+    fn collecting_a_single_file_uses_its_directory_as_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "extras/sample.mkv", "");
+        let found = collect(&[file.clone()]).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(
+            found,
+            [(canonical.clone(), canonical.parent().unwrap().to_path_buf())],
+            "a file named explicitly is imported even if it looks like a sample"
+        );
+    }
+
+    #[test]
+    fn collecting_a_missing_path_is_an_error() {
+        let error = collect(&[PathBuf::from("/definitely/not/here")]).unwrap_err();
+        assert!(error.to_string().contains("cannot access"));
+    }
+
+    struct Env {
+        dir: tempfile::TempDir,
+        config: Config,
+        library: Library,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = Config::default();
+            config.library.movies = dir.path().join("Movies");
+            config.library.tv = dir.path().join("TV");
+            config.import.probe = false;
+            Env {
+                dir,
+                config,
+                library: Library::in_memory().unwrap(),
+            }
+        }
+
+        fn write(&self, relative: &str, contents: &str) -> PathBuf {
+            write(self.dir.path(), relative, contents)
+        }
+
+        fn path(&self, relative: &str) -> PathBuf {
+            self.dir.path().join(relative)
+        }
+
+        fn import(&mut self, options: &Options) -> Result<()> {
+            run(&self.config, &mut self.library, options)
+        }
+
+        fn rescan(&mut self, paths: &[&str], pretend: bool) -> Result<()> {
+            let rescan = Rescan {
+                paths: paths.iter().map(|path| self.path(path)).collect(),
+                quiet: true,
+                pretend,
+                asis: true,
+                timid: false,
+                no_timid: false,
+            };
+            super::rescan(&self.config, &mut self.library, rescan)
+        }
+
+        fn rows(&self) -> Vec<Item> {
+            self.library.query(&crate::query::Query::default()).unwrap()
+        }
+
+        fn paths(&self) -> Vec<PathBuf> {
+            let mut paths: Vec<_> = self.rows().into_iter().map(|item| item.path).collect();
+            paths.sort();
+            paths
+        }
+    }
+
+    fn options(env: &Env, paths: &[&str]) -> Options {
+        Options {
+            paths: paths.iter().map(|path| env.path(path)).collect(),
+            operation: None,
+            quiet: true,
+            pretend: false,
+            kind: None,
+            asis: true,
+            timid: false,
+            no_timid: false,
+        }
+    }
+
+    #[test]
+    fn importing_copies_a_film_into_the_library() {
+        let mut env = Env::new();
+        let source = env.write("in/Heat.1995.1080p.BluRay.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        let destination = env.path("Movies/Heat (1995)/Heat (1995).mkv");
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "video");
+        assert!(source.exists(), "copying leaves the source");
+
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, destination);
+        assert_eq!((rows[0].title.as_str(), rows[0].year), ("Heat", Some(1995)));
+        assert_eq!(rows[0].media.resolution.as_deref(), Some("1080p"));
+        assert_eq!(rows[0].size, 5);
+        assert_eq!(
+            rows[0].original_path.as_deref(),
+            Some(std::fs::canonicalize(&source).unwrap().as_path())
+        );
+        assert!(rows[0].added > 0);
+    }
+
+    #[test]
+    fn importing_an_episode_files_it_by_season() {
+        let mut env = Env::new();
+        env.write("in/Show.Name.S02E03.Some.Title.720p.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, Kind::Episode);
+        assert_eq!((rows[0].season, rows[0].episode), (Some(2), Some(3)));
+        assert_eq!(
+            rows[0].path,
+            env.path("TV/Show Name/Season 02/Show Name - s02e03 - Some Title.mkv")
+        );
+        assert!(rows[0].path.exists());
+    }
+
+    #[test]
+    fn the_operation_option_overrides_the_configuration_and_prunes_directories() {
+        let mut env = Env::new();
+        let source = env.write("in/Heat 1995/heat.1995.mkv", "video");
+        let mut options = options(&env, &["in"]);
+        options.operation = Some(Operation::Move);
+        env.import(&options).unwrap();
+
+        assert!(!source.exists());
+        assert!(
+            !env.path("in/Heat 1995").exists(),
+            "the emptied directory goes"
+        );
+        assert!(
+            env.path("in").is_dir(),
+            "the directory given on the command line stays"
+        );
+        assert!(env.rows()[0].path.exists());
+    }
+
+    #[test]
+    fn the_configured_operation_applies_by_default() {
+        let mut env = Env::new();
+        env.config.import.operation = Operation::Move;
+        let source = env.write("in/Heat.1995.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn pretending_touches_neither_files_nor_the_database() {
+        let mut env = Env::new();
+        let source = env.write("in/Heat.1995.mkv", "video");
+        let mut options = options(&env, &["in"]);
+        options.pretend = true;
+        env.import(&options).unwrap();
+
+        assert!(source.exists());
+        assert!(env.rows().is_empty());
+        assert!(!env.path("Movies").exists());
+    }
+
+    #[test]
+    fn subtitles_follow_their_video_when_enabled() {
+        let mut env = Env::new();
+        env.write("in/Heat.1995.mkv", "video");
+        env.write("in/Heat.1995.en.forced.srt", "sub");
+        env.write("in/Heat.1995.fr.srt", "sub");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        let folder = env.path("Movies/Heat (1995)");
+        assert!(folder.join("Heat (1995).en.forced.srt").exists());
+        assert!(folder.join("Heat (1995).fr.srt").exists());
+    }
+
+    #[test]
+    fn subtitles_stay_behind_when_disabled() {
+        let mut env = Env::new();
+        env.config.import.subtitles = false;
+        env.write("in/Heat.1995.mkv", "video");
+        env.write("in/Heat.1995.en.srt", "sub");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert!(!env.path("Movies/Heat (1995)/Heat (1995).en.srt").exists());
+    }
+
+    #[test]
+    fn importing_twice_does_not_duplicate_files() {
+        let mut env = Env::new();
+        env.write("in/Heat.1995.1080p.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+        env.import(&options(&env, &["in"])).unwrap();
+
+        assert_eq!(env.rows().len(), 1);
+        let folder: Vec<_> = std::fs::read_dir(env.path("Movies/Heat (1995)"))
+            .unwrap()
+            .collect();
+        assert_eq!(folder.len(), 1);
+    }
+
+    #[test]
+    fn identical_files_in_one_run_are_imported_once() {
+        let mut env = Env::new();
+        env.write("in/a/Heat.1995.1080p.mkv", "video");
+        env.write("in/b/Heat.1995.1080p.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert_eq!(env.rows().len(), 1);
+    }
+
+    #[test]
+    fn a_second_version_gets_a_resolution_suffix_and_move_tidies_the_first() {
+        let mut env = Env::new();
+        env.write("in/Heat.1995.1080p.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert_eq!(
+            env.paths(),
+            [env.path("Movies/Heat (1995)/Heat (1995).mkv")]
+        );
+
+        env.write("in2/Heat.1995.2160p.mkv", "better video");
+        env.import(&options(&env, &["in2"])).unwrap();
+        assert_eq!(env.rows().len(), 2);
+        assert!(
+            env.path("Movies/Heat (1995)/Heat (1995) - 2160p.mkv")
+                .exists()
+        );
+        assert!(env.path("Movies/Heat (1995)/Heat (1995).mkv").exists());
+
+        crate::commands::move_items(
+            &env.config,
+            &mut env.library,
+            &crate::query::Query::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            env.paths(),
+            [
+                env.path("Movies/Heat (1995)/Heat (1995) - 1080p.mkv"),
+                env.path("Movies/Heat (1995)/Heat (1995) - 2160p.mkv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn existing_unregistered_files_are_never_overwritten() {
+        let mut env = Env::new();
+        let occupied = env.write("Movies/Heat (1995)/Heat (1995).mkv", "precious");
+        env.write("in/Heat.1995.mkv", "newcomer");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&occupied).unwrap(), "precious");
+        assert!(env.rows().is_empty());
+    }
+
+    #[test]
+    fn the_kind_option_overrides_guessing() {
+        let mut env = Env::new();
+        env.write("in/Show.S01E01.mkv", "video");
+        let mut as_film = options(&env, &["in"]);
+        as_film.kind = Some(Kind::Movie);
+        env.import(&as_film).unwrap();
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, Kind::Movie);
+        assert_eq!((rows[0].season, rows[0].episode), (None, None));
+    }
+
+    #[test]
+    fn forcing_episodes_skips_files_without_numbers() {
+        let mut env = Env::new();
+        env.write("in/Heat.1995.mkv", "video");
+        let mut as_episode = options(&env, &["in"]);
+        as_episode.kind = Some(Kind::Episode);
+        env.import(&as_episode).unwrap();
+        assert!(env.rows().is_empty());
+    }
+
+    #[test]
+    fn importing_a_missing_path_fails() {
+        let mut env = Env::new();
+        let error = env.import(&options(&env, &["nowhere"])).unwrap_err();
+        assert!(error.to_string().contains("cannot access"));
+    }
+
+    #[test]
+    fn importing_without_videos_is_a_no_op() {
+        let mut env = Env::new();
+        env.write("in/readme.txt", "hello");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert!(env.rows().is_empty());
+    }
+
+    #[test]
+    fn rescanning_records_files_where_they_are() {
+        let mut env = Env::new();
+        let film = env.write("Movies/messy/Heat.1995.mkv", "video");
+        let episode = env.write("TV/Show/Show.S01E01.mkv", "video");
+        env.rescan(&[], false).unwrap();
+
+        let mut expected = vec![film.clone(), episode.clone()];
+        expected.sort();
+        assert_eq!(env.paths(), expected);
+        assert!(film.exists() && episode.exists(), "nothing moves");
+        assert!(env.rows().iter().all(|item| item.original_path.is_none()));
+    }
+
+    #[test]
+    fn rescanning_twice_adds_nothing_new() {
+        let mut env = Env::new();
+        env.write("Movies/Heat.1995.mkv", "video");
+        env.rescan(&[], false).unwrap();
+        let first = env.rows();
+        env.rescan(&[], false).unwrap();
+        assert_eq!(env.rows().len(), 1);
+        assert_eq!(env.rows()[0].id, first[0].id);
+    }
+
+    #[test]
+    fn a_pretend_rescan_records_nothing() {
+        let mut env = Env::new();
+        env.write("Movies/Heat.1995.mkv", "video");
+        env.rescan(&[], true).unwrap();
+        assert!(env.rows().is_empty());
+    }
+
+    #[test]
+    fn rescanning_given_paths_ignores_the_rest_of_the_library() {
+        let mut env = Env::new();
+        env.write("Movies/Heat.1995.mkv", "video");
+        env.write("Movies/Ronin.1998.mkv", "video");
+        env.write("TV/Show/Show.S01E01.mkv", "video");
+        env.rescan(&["Movies/Ronin.1998.mkv"], false).unwrap();
+        assert_eq!(env.paths(), [env.path("Movies/Ronin.1998.mkv")]);
+    }
+
+    #[test]
+    fn rescanning_tolerates_one_missing_library_folder() {
+        let mut env = Env::new();
+        env.write("Movies/Heat.1995.mkv", "video");
+        env.rescan(&[], false).unwrap();
+        assert_eq!(env.rows().len(), 1);
+    }
+
+    #[test]
+    fn rescanning_fails_when_no_library_folder_exists() {
+        let mut env = Env::new();
+        let error = env.rescan(&[], false).unwrap_err();
+        assert!(error.to_string().contains("neither"));
+    }
+
+    #[test]
+    fn a_rescanned_library_can_be_renamed_afterwards() {
+        let mut env = Env::new();
+        env.write("Movies/messy/Heat.1995.mkv", "video");
+        env.rescan(&[], false).unwrap();
+        crate::commands::move_items(
+            &env.config,
+            &mut env.library,
+            &crate::query::Query::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            env.paths(),
+            [env.path("Movies/Heat (1995)/Heat (1995).mkv")]
+        );
+        assert!(!env.path("Movies/messy").exists());
+    }
 }
