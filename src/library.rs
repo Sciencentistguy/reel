@@ -187,6 +187,15 @@ impl Library {
         )?)
     }
 
+    /// Whether an item was imported from `path`.
+    pub fn imported_from(&self, path: &Path) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM items WHERE original_path = ?1)",
+            [path_text(path)],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Inserts `item`, or updates it when it already has an id.
     pub fn save(&mut self, item: &mut Item) -> Result<()> {
         let tx = self.conn.transaction()?;

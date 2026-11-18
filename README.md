@@ -151,6 +151,10 @@ air date and runtime. A blank answer skips the file; Ctrl-C stops the import. Th
 files numbered differently from the source, find their place. `reel sync` applies the same check to items already in the library,
 leaving any that fail untouched and listing them.
 
+A file the library records as an item's original path is skipped as already imported, even
+when the library's copy has since changed, so importing a download folder again only picks up
+new files.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the

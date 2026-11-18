@@ -1227,7 +1227,8 @@ fn run_with(
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
-        if library.contains_path(&path)? {
+        // A copied file can change while its source stays, so the source is recognised by name.
+        if library.contains_path(&path)? || (!adopt && library.imported_from(&path)?) {
             known += 1;
             continue;
         }
@@ -2392,6 +2393,17 @@ mod tests {
             "the directory given on the command line stays"
         );
         assert!(env.rows()[0].path.exists());
+    }
+
+    #[test]
+    fn files_already_imported_from_are_skipped() {
+        let mut env = Env::new();
+        env.write("in/Heat.1995.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+        // As after a remux, the library's file and the source no longer share a size.
+        env.write("in/Heat.1995.mkv", "a different size");
+        env.import(&options(&env, &["in"])).unwrap();
+        assert_eq!(env.rows().len(), 1);
     }
 
     #[test]
