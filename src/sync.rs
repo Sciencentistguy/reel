@@ -226,6 +226,7 @@ mod tests {
             original_title: None,
             overview: None,
             runtime: None,
+            episode_count: None,
         }
     }
 

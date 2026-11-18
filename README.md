@@ -122,6 +122,12 @@ remakes and films that share a name. A difference of up to 6% is ignored, which 
 and credits. The penalty is lighter for files with an edition, which may legitimately run longer or
 shorter. Running times are shown beside the candidates when you are asked to choose.
 
+Shows are checked the same way: when the match is uncertain, the best few candidates' episode
+lists are fetched and each is penalised by the share of files whose episode it lacks, so a
+six-part miniseries cannot claim a hundred files from the long-running show it shares a name with.
+Up to 5% may be missing without penalty, which covers specials and episodes not yet listed.
+Episode counts are shown beside the candidates.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the

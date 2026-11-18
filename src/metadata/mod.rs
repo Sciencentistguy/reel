@@ -25,6 +25,8 @@ pub struct Candidate {
     pub overview: Option<String>,
     /// Running time in minutes; search results usually leave it out.
     pub runtime: Option<u32>,
+    /// How many episodes a show has; searches leave it out.
+    pub episode_count: Option<usize>,
 }
 
 /// A file's running time, to compare with a candidate's.
@@ -465,6 +467,7 @@ mod tests {
             original_title: None,
             overview: None,
             runtime: None,
+            episode_count: None,
         }
     }
 

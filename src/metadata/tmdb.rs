@@ -74,6 +74,7 @@ impl From<Movie> for Candidate {
             original_title: distinct_from(&movie.title, movie.original_title),
             overview: non_empty(movie.overview),
             runtime: movie.runtime.filter(|&minutes| minutes > 0),
+            episode_count: None,
             title: movie.title,
         }
     }
@@ -89,6 +90,7 @@ impl From<Show> for Candidate {
             original_title: distinct_from(&show.name, show.original_name),
             overview: non_empty(show.overview),
             runtime: None,
+            episode_count: None,
             title: show.name,
         }
     }
@@ -277,6 +279,7 @@ mod tests {
                 original_title: None,
                 overview: None,
                 runtime: None,
+                episode_count: None,
             }
         );
         assert_eq!(found[1].year, None);
