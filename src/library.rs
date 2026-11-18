@@ -165,6 +165,10 @@ impl Library {
 
     fn init(mut conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
+        // Write-ahead logging with NORMAL sync skips the fsyncs that otherwise dominate each
+        // commit, while still surviving crashes; only power loss can drop the latest commits.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         migrate(&mut conn)?;
         Ok(Library { conn })
     }
