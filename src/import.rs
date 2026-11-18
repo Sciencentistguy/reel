@@ -310,9 +310,23 @@ fn hyperlink(text: &str, url: &str) -> String {
     format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
+/// Whether output may be coloured: it is a terminal, and `NO_COLOR` isn't set.
+fn use_colour() -> bool {
+    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
 fn match_percent(distance: f64) -> String {
-    let colour = io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
-    colour_percent(((1.0 - distance) * 100.0).round(), colour)
+    colour_percent(((1.0 - distance) * 100.0).round(), use_colour())
+}
+
+/// `N file(s) unmatched`, in red when `colour` is set.
+fn unmatched_note(count: usize, colour: bool) -> String {
+    let text = format!("{count} file(s) unmatched");
+    if colour {
+        format!("\x1b[31m{text}\x1b[0m")
+    } else {
+        text
+    }
 }
 
 /// Formats a match percentage, coloured by how trustworthy it is when `colour` is set.
@@ -524,7 +538,11 @@ fn print_candidate(
     let episodes = candidate.episodes.as_deref().map_or(String::new(), |list| {
         match unlisted(files, candidate) {
             0 => format!(", {}", EpisodeCount::of(list)),
-            missing => format!(", {}, {missing} file(s) unmatched", EpisodeCount::of(list)),
+            missing => format!(
+                ", {}, {}",
+                EpisodeCount::of(list),
+                unmatched_note(missing, use_colour())
+            ),
         }
     });
     println!(
@@ -571,8 +589,8 @@ fn decide(
             Ok(named) if timid => named_by_id = Some(named),
             Ok((distance, candidate)) if !covers(group, &candidate) => {
                 println!(
-                    "  {source}-{id}: {} file(s) unmatched ({}).",
-                    unlisted(&group.files, &candidate),
+                    "  {source}-{id}: {} ({}).",
+                    unmatched_note(unlisted(&group.files, &candidate), use_colour()),
                     match_percent(distance)
                 );
                 named_by_id = Some((distance, candidate));
@@ -1733,6 +1751,15 @@ mod tests {
             quiet_decision(&mistagged, &source),
             Decision::Skip
         ));
+    }
+
+    #[test]
+    fn unmatched_files_are_red_only_when_colouring() {
+        assert_eq!(unmatched_note(3, false), "3 file(s) unmatched");
+        assert_eq!(
+            unmatched_note(1, true),
+            "\x1b[31m1 file(s) unmatched\x1b[0m"
+        );
     }
 
     #[test]
