@@ -268,20 +268,22 @@ const OVERVIEW_LENGTH: usize = 300;
 const DETAIL_INDENT: &str = "     ";
 const MAX_DETAIL_WIDTH: usize = 100;
 
+/// A candidate's original title and overview, dimmed beneath it, then a blank line to set it
+/// apart from the next.
 fn print_details(candidate: &Candidate) {
     if let Some(original) = &candidate.original_title {
-        println!("{DETAIL_INDENT}Original title: {original}");
-    }
-    if let Some(overview) = &candidate.overview {
-        let width = textwrap::termwidth().min(MAX_DETAIL_WIDTH);
-        let options = textwrap::Options::new(width)
-            .initial_indent(DETAIL_INDENT)
-            .subsequent_indent(DETAIL_INDENT);
         println!(
-            "{}",
-            textwrap::fill(&truncate(overview, OVERVIEW_LENGTH), options)
+            "{DETAIL_INDENT}{}",
+            paint("2", &format!("Original title: {original}"))
         );
     }
+    if let Some(overview) = &candidate.overview {
+        let width = textwrap::termwidth().min(MAX_DETAIL_WIDTH) - DETAIL_INDENT.len();
+        for line in textwrap::wrap(&truncate(overview, OVERVIEW_LENGTH), width) {
+            println!("{DETAIL_INDENT}{}", paint("2", &line));
+        }
+    }
+    println!();
 }
 
 /// Collapses whitespace and cuts `text` at a word boundary within `width` characters.
@@ -313,6 +315,21 @@ fn hyperlink(text: &str, url: &str) -> String {
 /// Whether output may be coloured: it is a terminal, and `NO_COLOR` isn't set.
 fn use_colour() -> bool {
     io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// `text` in the SGR style `code` (such as `"33"` for yellow), when output may be coloured.
+fn paint(code: &str, text: &str) -> String {
+    if use_colour() {
+        format!("\x1b[{code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+/// A warning about one file: the problem, then the file's path beneath it, dimmed.
+fn warn_about(path: &Path, problem: &str) {
+    eprintln!("  {} {problem}", paint("33", "warning:"));
+    eprintln!("    {}", paint("2", &path.display().to_string()));
 }
 
 fn match_percent(distance: f64) -> String {
@@ -547,7 +564,7 @@ fn print_candidate(
     });
     println!(
         "  {label} {} [{}-{}] ({}{runtime}{episodes}){known}",
-        describe_candidate(candidate),
+        paint("1", &describe_candidate(candidate)),
         candidate.source,
         candidate.id,
         match_percent(distance)
@@ -790,9 +807,9 @@ fn apply_episode(
 
     if let Some(date) = &parsed.air_date {
         let Some(found) = episodes.iter().find(|e| e.air_date.as_ref() == Some(date)) else {
-            eprintln!(
-                "  warning: no episode of the show aired on {date} ({})",
-                item.path.display()
+            warn_about(
+                &item.path,
+                &format!("no episode of the show aired on {date}"),
             );
             return false;
         };
@@ -815,9 +832,9 @@ fn apply_episode(
             .iter()
             .find(|e| e.season == season && e.number == number)
         else {
-            eprintln!(
-                "  warning: s{season:02}e{number:02} is not in the show's episode list ({})",
-                item.path.display()
+            warn_about(
+                &item.path,
+                &format!("s{season:02}e{number:02} is not in the show's episode list"),
             );
             return false;
         };
@@ -850,26 +867,24 @@ fn place_episode(
     if apply_episode(item, parsed, episodes, duration) {
         return Ok(true);
     }
-    let skip = |item: &Item| {
-        println!("  Skipping {}.", item.path.display());
+    let skip = || {
+        println!("    {}", paint("2", "Skipped."));
         Ok(false)
     };
     let Some(ask) = ask.filter(|_| !episodes.is_empty()) else {
-        return skip(item);
+        return skip();
     };
-    let name = item
-        .path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
+    println!(
+        "    {}",
+        paint(
+            "2",
+            "Which episode is it? Give its number (s13e05) or air date, or search by title or year."
+        )
+    );
+    println!("    {}", paint("2", "Leave blank to skip."));
     loop {
-        let question = format!(
-            "  Which episode is {name}? An episode (s13e05) or air date, words from its title or \
-             a year to search, or blank to skip: "
-        );
-        let Some(answer) = ask(&question)?.filter(|answer| !answer.is_empty()) else {
-            return skip(item);
+        let Some(answer) = ask("    episode> ")?.filter(|answer| !answer.is_empty()) else {
+            return skip();
         };
         let given = parse::parse_name(&format!("Show {answer}"));
         if given.air_date.is_some() || (given.season.is_some() && given.episode.is_some()) {
@@ -877,7 +892,8 @@ fn place_episode(
             (named.season, named.episode) = (given.season, given.episode);
             (named.episode_end, named.air_date) = (given.episode_end, given.air_date);
             if apply_episode(item, &named, episodes, duration) {
-                println!("  Placed as {}.", item.episode_code().unwrap_or_default());
+                let code = item.episode_code().unwrap_or_default();
+                println!("    {}", paint("32", &format!("Placed as {code}.")));
                 return Ok(true);
             }
             continue;
@@ -895,15 +911,22 @@ fn place_episode(
             })
             .collect();
         if found.is_empty() {
-            println!("  No episode's title or air date matches {answer:?}.");
+            println!(
+                "      {}",
+                paint(
+                    "2",
+                    &format!("No episode's title or air date matches {answer:?}.")
+                )
+            );
         }
         for episode in found.iter().take(SEARCH_RESULTS) {
-            println!("    {}", describe_listed(episode));
+            println!("      {}", describe_listed(episode));
         }
         if found.len() > SEARCH_RESULTS {
+            let more = found.len() - SEARCH_RESULTS;
             println!(
-                "    … and {} more; search more narrowly.",
-                found.len() - SEARCH_RESULTS
+                "      {}",
+                paint("2", &format!("… and {more} more; search more narrowly."))
             );
         }
     }
@@ -912,7 +935,8 @@ fn place_episode(
 /// How many episodes a title search lists.
 const SEARCH_RESULTS: usize = 20;
 
-/// `s13e05 Summer Solstice (2005-03-27, 1h 30m)`, for picking an episode from a list.
+/// `s13e05 Summer Solstice (2005-03-27, 1h 30m)`, for picking an episode from a list, with the
+/// number in bold and the details dimmed.
 fn describe_listed(episode: &EpisodeInfo) -> String {
     let mut details = Vec::new();
     details.extend(episode.air_date.clone());
@@ -921,9 +945,13 @@ fn describe_listed(episode: &EpisodeInfo) -> String {
             .runtime
             .map(|minutes| human_duration(f64::from(minutes) * 60.0)),
     );
-    let mut text = describe_episodes(&[episode]);
+    let code = format!("s{:02}e{:02}", episode.season, episode.number);
+    let mut text = paint("1", &code);
+    if let Some(title) = &episode.title {
+        text += &format!(" {title}");
+    }
     if !details.is_empty() {
-        text += &format!(" ({})", details.join(", "));
+        text += &format!(" {}", paint("2", &format!("({})", details.join(", "))));
     }
     text
 }
@@ -933,12 +961,15 @@ fn fits(item: &Item, duration: Option<f64>, episodes: &[&EpisodeInfo]) -> bool {
     if metadata::episodes_fit(duration, episodes) {
         return true;
     }
-    eprintln!(
-        "  warning: {} runs {} but {} runs {}",
-        item.path.display(),
-        human_duration(duration.unwrap_or_default()),
-        describe_episodes(episodes),
-        human_duration(f64::from(metadata::episodes_runtime(episodes).unwrap_or_default()) * 60.0),
+    let runtime = metadata::episodes_runtime(episodes).unwrap_or_default();
+    warn_about(
+        &item.path,
+        &format!(
+            "the file runs {} but {} runs {}",
+            human_duration(duration.unwrap_or_default()),
+            describe_episodes(episodes),
+            human_duration(f64::from(runtime) * 60.0),
+        ),
     );
     false
 }
