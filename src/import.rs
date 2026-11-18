@@ -196,6 +196,16 @@ fn in_extras_directory(path: &Path, root: &Path) -> bool {
 }
 
 fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let (files, ignored) = videos(paths)?;
+    if ignored > 0 {
+        println!("Ignoring {ignored} sample or extras file(s).");
+    }
+    Ok(files)
+}
+
+/// The video files at or under `paths`, canonicalised, each with the given path it was found
+/// under, and how many samples and extras were left out.
+pub fn videos(paths: &[PathBuf]) -> Result<(Vec<(PathBuf, PathBuf)>, usize)> {
     let mut files = Vec::new();
     let mut ignored = 0;
     for path in paths {
@@ -218,10 +228,7 @@ fn collect(paths: &[PathBuf]) -> Result<Vec<(PathBuf, PathBuf)>> {
             files.push((entry.into_path(), path.clone()));
         }
     }
-    if ignored > 0 {
-        println!("Ignoring {ignored} sample or extras file(s).");
-    }
-    Ok(files)
+    Ok((files, ignored))
 }
 
 fn group(files: Vec<Pending>) -> Vec<Group> {

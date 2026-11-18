@@ -1,14 +1,19 @@
-//! `reel missing`: list the episodes of identified shows that the library has no file for.
+//! `reel missing`: list the episodes of identified shows that the library has no file for, and
+//! the files in the TV folder that the database doesn't know about.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
 use crate::config::Config;
+use crate::import;
 use crate::library::Library;
 use crate::metadata::{self, EpisodeInfo, ShowSource};
 use crate::model::{Item, Kind};
+use crate::parse;
 use crate::query::Query;
 
 #[derive(clap::Args)]
@@ -21,44 +26,142 @@ pub struct Options {
 
 pub fn run(config: &Config, library: &Library, options: &Options) -> Result<()> {
     let items = library.query(&Query::parse(&options.query)?)?;
+    let tv = TvFolder::new(&config.library.tv);
+    let mut strays = tv.untracked(library)?;
     let shows = shows(items);
     let today = today();
     let mut sources: HashMap<String, Box<dyn ShowSource>> = HashMap::new();
-    let (mut total, mut failed) = (0, 0);
+    let (mut total, mut on_disk, mut failed) = (0, 0, 0);
 
     for ((source, id), items) in shows {
+        let folders: HashSet<OsString> = items
+            .iter()
+            .filter_map(|item| tv.show_folder(&item.path))
+            .collect();
+        let mut untracked: Vec<PathBuf> = folders
+            .iter()
+            .filter_map(|folder| strays.remove(folder))
+            .flatten()
+            .collect();
+        untracked.sort();
+
         if !sources.contains_key(&source) {
             let client = metadata::show_source_named(&config.metadata, &source)?;
             sources.insert(source.clone(), client);
         }
-        let episodes = match sources[&source].episodes(&id, None) {
-            Ok(episodes) => episodes,
-            Err(err) => {
-                eprintln!("warning: cannot fetch {source}-{id}: {err:#}");
-                failed += 1;
-                continue;
-            }
-        };
+        let episodes = sources[&source].episodes(&id, None).unwrap_or_else(|err| {
+            eprintln!("warning: cannot fetch {source}-{id}: {err:#}");
+            failed += 1;
+            Vec::new()
+        });
         let missing = missing(&items, &episodes, options.specials, &today);
-        if missing.is_empty() {
+        if missing.is_empty() && untracked.is_empty() {
             continue;
         }
+
         let show = &items[0];
-        match show.year {
-            Some(year) => println!("{} ({year}) [{source}-{id}]", show.title),
-            None => println!("{} [{source}-{id}]", show.title),
+        let mut header = match show.year {
+            Some(year) => format!("{} ({year}) [{source}-{id}]", show.title),
+            None => format!("{} [{source}-{id}]", show.title),
+        };
+        if !untracked.is_empty() {
+            header += &format!(" - {} file(s) on disk not in the library", untracked.len());
         }
+        println!("{header}");
+        let present = Coverage::of_files(&untracked);
         for episode in &missing {
-            println!("  {}", describe(episode));
+            let note = if present.covers(episode) {
+                " (on disk, not in the library)"
+            } else {
+                ""
+            };
+            println!("  {}{note}", describe(episode));
+        }
+        if !untracked.is_empty() {
+            println!("  Not in the library:");
+            for path in &untracked {
+                println!("    {}", tv.relative(path).display());
+            }
         }
         total += missing.len();
+        on_disk += untracked.len();
+    }
+
+    if options.query.is_empty() && !strays.is_empty() {
+        println!(
+            "Folders in {} with no show in the library:",
+            config.library.tv.display()
+        );
+        for (folder, files) in &strays {
+            println!("  {} ({} file(s))", folder.to_string_lossy(), files.len());
+            on_disk += files.len();
+        }
     }
 
     println!("{total} episode(s) missing.");
+    if on_disk > 0 {
+        println!("{on_disk} file(s) on disk are not in the library; `reel rescan` adds them.");
+    }
     if failed > 0 {
         println!("Could not fetch episode lists for {failed} show(s).");
     }
     Ok(())
+}
+
+/// The library's TV folder, where each show has a folder of its own.
+struct TvFolder {
+    root: PathBuf,
+    /// `root` with symlinks resolved, as found files' paths are.
+    canonical: Option<PathBuf>,
+}
+
+impl TvFolder {
+    fn new(root: &Path) -> Self {
+        TvFolder {
+            root: root.to_path_buf(),
+            canonical: std::fs::canonicalize(root).ok(),
+        }
+    }
+
+    fn relative<'a>(&self, path: &'a Path) -> &'a Path {
+        self.canonical
+            .as_deref()
+            .and_then(|canonical| path.strip_prefix(canonical).ok())
+            .or_else(|| path.strip_prefix(&self.root).ok())
+            .unwrap_or(path)
+    }
+
+    /// The name of the show folder holding `path`, when it is inside one.
+    fn show_folder(&self, path: &Path) -> Option<OsString> {
+        let relative = self.relative(path);
+        if relative == path || relative.components().count() < 2 {
+            return None;
+        }
+        relative
+            .components()
+            .next()
+            .map(|first| first.as_os_str().to_owned())
+    }
+
+    /// Video files in the TV folder that the database has no row for, by show folder.
+    fn untracked(&self, library: &Library) -> Result<BTreeMap<OsString, Vec<PathBuf>>> {
+        let mut strays: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        if self.canonical.is_none() {
+            return Ok(strays);
+        }
+        let (files, _) = import::videos(std::slice::from_ref(&self.root))?;
+        for (path, _) in files {
+            if library.contains_path(&path)?
+                || library.contains_path(&self.root.join(self.relative(&path)))?
+            {
+                continue;
+            }
+            if let Some(folder) = self.show_folder(&path) {
+                strays.entry(folder).or_default().push(path);
+            }
+        }
+        Ok(strays)
+    }
 }
 
 /// Groups episode files by the show they were matched to.
@@ -72,6 +175,71 @@ fn shows(items: Vec<Item>) -> BTreeMap<(String, String), Vec<Item>> {
     shows
 }
 
+/// The episodes some set of files holds, by number and by air date.
+#[derive(Default)]
+struct Coverage {
+    numbers: HashSet<(u32, u32)>,
+    dates: HashSet<String>,
+}
+
+impl Coverage {
+    fn add(
+        &mut self,
+        season: Option<u32>,
+        first: Option<u32>,
+        last: Option<u32>,
+        date: Option<&str>,
+        date_based: bool,
+    ) {
+        if date_based {
+            self.dates.extend(date.map(str::to_owned));
+        } else if let (Some(season), Some(first)) = (season, first) {
+            for number in first..=last.unwrap_or(first).max(first) {
+                self.numbers.insert((season, number));
+            }
+        }
+    }
+
+    fn of_items(items: &[Item]) -> Self {
+        let mut coverage = Coverage::default();
+        for item in items {
+            coverage.add(
+                item.season,
+                item.episode,
+                item.episode_end,
+                item.air_date.as_deref(),
+                item.date_based,
+            );
+        }
+        coverage
+    }
+
+    /// What files' names say they hold, for files not yet in the library.
+    fn of_files(paths: &[PathBuf]) -> Self {
+        let mut coverage = Coverage::default();
+        for path in paths {
+            let parsed = parse::parse(path);
+            let date_based = parsed.air_date.is_some();
+            coverage.add(
+                parsed.season,
+                parsed.episode,
+                parsed.episode_end,
+                parsed.air_date.as_deref(),
+                date_based,
+            );
+        }
+        coverage
+    }
+
+    fn covers(&self, episode: &EpisodeInfo) -> bool {
+        self.numbers.contains(&(episode.season, episode.number))
+            || episode
+                .air_date
+                .as_ref()
+                .is_some_and(|date| self.dates.contains(date))
+    }
+}
+
 /// The aired episodes no file covers, in the order the source lists them.
 fn missing<'a>(
     items: &[Item],
@@ -79,28 +247,12 @@ fn missing<'a>(
     specials: bool,
     today: &str,
 ) -> Vec<&'a EpisodeInfo> {
-    let mut held = HashSet::new();
-    let mut dates = HashSet::new();
-    for item in items {
-        if item.date_based {
-            dates.extend(item.air_date.as_deref());
-        } else if let (Some(season), Some(first)) = (item.season, item.episode) {
-            for number in first..=item.episode_end.unwrap_or(first).max(first) {
-                held.insert((season, number));
-            }
-        }
-    }
+    let held = Coverage::of_items(items);
     episodes
         .iter()
         .filter(|episode| specials || episode.season != 0)
         .filter(|episode| episode.air_date.as_deref().is_none_or(|date| date <= today))
-        .filter(|episode| !held.contains(&(episode.season, episode.number)))
-        .filter(|episode| {
-            episode
-                .air_date
-                .as_deref()
-                .is_none_or(|date| !dates.contains(date))
-        })
+        .filter(|episode| !held.covers(episode))
         .collect()
 }
 
@@ -249,6 +401,76 @@ mod tests {
             .map(|((_, id), items)| (id.as_str(), items.len()))
             .collect();
         assert_eq!(sizes, [("1", 2), ("2", 1)]);
+    }
+
+    #[test]
+    fn files_on_disk_but_not_in_the_database_are_found_by_show_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |relative: &str| {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "video").unwrap();
+            path
+        };
+        let known = write("TV/Show {tvdb-1}/Season 01/Show - s01e01.mkv");
+        write("TV/Show {tvdb-1}/Season 01/Show - s01e02.mkv");
+        write("TV/Show {tvdb-1}/Season 01/Show - s01e02.en.srt");
+        write("TV/Archer/Archer.S01E01.mkv");
+        write("TV/loose.S01E01.mkv");
+
+        let mut library = Library::in_memory().unwrap();
+        let mut item = file(1, 1, None);
+        item.path = known.clone();
+        library.save(&mut item).unwrap();
+
+        let tv = TvFolder::new(&dir.path().join("TV"));
+        let strays = tv.untracked(&library).unwrap();
+        let found: Vec<_> = strays
+            .iter()
+            .map(|(folder, files)| {
+                let names: Vec<_> = files
+                    .iter()
+                    .map(|path| tv.relative(path).to_owned())
+                    .collect();
+                (folder.to_string_lossy().into_owned(), names)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    "Archer".to_string(),
+                    vec![PathBuf::from("Archer/Archer.S01E01.mkv")]
+                ),
+                (
+                    "Show {tvdb-1}".to_string(),
+                    vec![PathBuf::from("Show {tvdb-1}/Season 01/Show - s01e02.mkv")]
+                ),
+            ],
+            "files outside a show folder and those in the database are left out"
+        );
+        assert_eq!(tv.show_folder(&known), Some("Show {tvdb-1}".into()));
+    }
+
+    #[test]
+    fn a_missing_tv_folder_has_nothing_untracked() {
+        let tv = TvFolder::new(Path::new("/definitely/not/here"));
+        assert!(
+            tv.untracked(&Library::in_memory().unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn untracked_files_cover_the_episodes_their_names_give() {
+        let present = Coverage::of_files(&[
+            PathBuf::from("/tv/Show/Show - s01e02-e03.mkv"),
+            PathBuf::from("/tv/Daily/Daily 2024-03-01.mkv"),
+        ]);
+        assert!(present.covers(&episode(1, 3, None)));
+        assert!(!present.covers(&episode(1, 4, None)));
+        assert!(present.covers(&episode(2024, 9, Some("2024-03-01"))));
     }
 
     #[test]

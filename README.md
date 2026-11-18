@@ -97,7 +97,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
 | `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
-| `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
+| `reel missing [QUERY]` | List aired episodes of shows with no file, and files on disk not in the library (`-s` includes specials) |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel purge [QUERY]` | Remove items lacking a source, year, or episode numbering (`-d` also deletes the files) |
@@ -152,6 +152,12 @@ leaves blank keep their current values.
 and prints the episodes no file covers, grouped by show. Multi-episode files count for each
 episode they span, and date-based files are matched by air date. Episodes with a future air
 date are left out, as are specials (season 0) unless `--specials` (`-s`) is given.
+
+It also walks the TV folder for video files the database has no row for. A show with any in its
+folder is highlighted (`3 file(s) on disk not in the library`), those files are listed under it, and
+missing episodes that one of them holds are marked `(on disk, not in the library)`. Shows with no
+missing episodes still appear when they have such files. Without a query, folders belonging to no
+show in the database are listed at the end. `reel rescan` adds these files to the library.
 
 `reel purge` removes items whose metadata is incomplete: anything not matched to a source, films
 without a year, and episodes without a season and episode number (or, for daily shows, an air
