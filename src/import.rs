@@ -1072,6 +1072,9 @@ impl Importer<'_> {
             item.media.resolution = file.parsed.resolution.clone();
         }
         (item.size, item.mtime) = file_stamp(&file.path)?;
+        if !self.adopt {
+            item.original_stamp = Some((item.size, item.mtime));
+        }
 
         if self.library.has_duplicate(&item)?
             || self
@@ -1329,8 +1332,10 @@ fn run_with(
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
-        // A remuxed or copied file differs from its source, so the source is recognised by name.
-        if library.contains_path(&path)? || (!adopt && library.imported_from(&path)?) {
+        // A remuxed file differs from its source, so the source is recognised where it was.
+        if library.contains_path(&path)?
+            || (!adopt && library.imported_from(&path, file_stamp(&path)?)?)
+        {
             known += 1;
             continue;
         }
@@ -2590,10 +2595,28 @@ mod tests {
         let mut env = Env::new();
         env.write("in/Heat.1995.mkv", "video");
         env.import(&options(&env, &["in"])).unwrap();
+        let row = &env.rows()[0];
         // As after a remux, the library's file and the source no longer share a size.
-        env.write("in/Heat.1995.mkv", "a different size");
+        std::fs::write(&row.path, "a different size").unwrap();
+        let mut item = row.clone();
+        (item.size, item.mtime) = file_stamp(&row.path).unwrap();
+        env.library.save(&mut item).unwrap();
         env.import(&options(&env, &["in"])).unwrap();
         assert_eq!(env.rows().len(), 1);
+    }
+
+    #[test]
+    fn a_new_file_where_an_imported_one_was_is_imported() {
+        let mut env = Env::new();
+        let source = env.write("in/Heat.1995.mkv", "video");
+        let mut options = options(&env, &["in"]);
+        options.operation = Some(Operation::Move);
+        env.import(&options).unwrap();
+        assert!(!source.exists());
+
+        env.write("in/Heat.1995.mkv", "a re-download");
+        env.import(&options).unwrap();
+        assert_eq!(env.rows().len(), 2, "both versions are in the library");
     }
 
     #[test]

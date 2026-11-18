@@ -70,12 +70,16 @@ CREATE TABLE IF NOT EXISTS subtitle_streams (
     "
 ALTER TABLE items ADD COLUMN embedded_title TEXT;
 ",
+    "
+ALTER TABLE items ADD COLUMN original_size INTEGER;
+ALTER TABLE items ADD COLUMN original_mtime INTEGER;
+",
 ];
 
 const COLUMNS: &str = "kind, path, original_path, title, year, source, source_id, edition, part, season, episode, \
     episode_end, episode_title, air_date, date_based, width, height, resolution, video_codec, \
     bit_depth, colour_space, colour_primaries, transfer, hdr, dv_profile, duration, size, mtime, \
-    added, embedded_title";
+    added, embedded_title, original_size, original_mtime";
 
 pub struct Library {
     conn: Connection,
@@ -95,6 +99,10 @@ fn item_from_row(row: &Row) -> rusqlite::Result<Item> {
         original_path: row
             .get::<_, Option<String>>("original_path")?
             .map(PathBuf::from),
+        original_stamp: row
+            .get::<_, Option<i64>>("original_size")?
+            .zip(row.get::<_, Option<i64>>("original_mtime")?)
+            .map(|(size, mtime)| (size as u64, mtime)),
         title: row.get("title")?,
         year: row.get("year")?,
         source: row.get("source")?,
@@ -187,11 +195,13 @@ impl Library {
         )?)
     }
 
-    /// Whether an item was imported from `path`.
-    pub fn imported_from(&self, path: &Path) -> Result<bool> {
+    /// Whether an item was imported from `path` when the file there had this size and
+    /// modification time, so it is the same file and not a new one that has taken its place.
+    pub fn imported_from(&self, path: &Path, (size, mtime): (u64, i64)) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM items WHERE original_path = ?1)",
-            [path_text(path)],
+            "SELECT EXISTS (SELECT 1 FROM items WHERE original_path = ?1 \
+             AND original_size = ?2 AND original_mtime = ?3)",
+            params![path_text(path), size as i64, mtime],
             |row| row.get(0),
         )?)
     }
@@ -231,14 +241,16 @@ impl Library {
             item.mtime,
             item.added,
             media.title,
+            item.original_stamp.map(|(size, _)| size as i64),
+            item.original_stamp.map(|(_, mtime)| mtime),
             item.id,
         ];
-        let placeholders: Vec<String> = (1..=30).map(|n| format!("?{n}")).collect();
+        let placeholders: Vec<String> = (1..=32).map(|n| format!("?{n}")).collect();
         match item.id {
             None => {
                 tx.execute(
                     &format!(
-                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?31)",
+                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?33)",
                         placeholders.join(", ")
                     ),
                     values,
@@ -248,7 +260,7 @@ impl Library {
             Some(_) => {
                 tx.execute(
                     &format!(
-                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?31",
+                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?33",
                         placeholders.join(", ")
                     ),
                     values,

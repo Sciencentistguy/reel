@@ -156,9 +156,11 @@ air date and runtime. A blank answer skips the file; Ctrl-C stops the import. Th
 files numbered differently from the source, find their place. `reel sync` applies the same check to items already in the library,
 leaving any that fail untouched and listing them.
 
-A file the library records as an item's original path is skipped as already imported, even
-when the library's copy has since changed, so importing a download folder again only picks up
-new files.
+A file still at the path an item was imported from, with the same size and modification time,
+is skipped as already imported even when the library's copy differs (as a remux's does), so
+importing a download folder again only picks up new files. A different file that has since taken
+its place is imported as usual. Items imported before reel kept their source's size and
+modification time are only recognised by the duplicate check.
 
 #### Remuxing
 

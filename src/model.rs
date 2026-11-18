@@ -86,6 +86,8 @@ pub struct Item {
     pub path: PathBuf,
     /// Where the file was imported from; unknown for items imported before this was recorded.
     pub original_path: Option<PathBuf>,
+    /// The size and modification time of the file at `original_path` when it was imported.
+    pub original_stamp: Option<(u64, i64)>,
     pub title: String,
     pub year: Option<i32>,
     pub source: Option<String>,
@@ -111,6 +113,7 @@ impl Item {
             kind,
             path,
             original_path: None,
+            original_stamp: None,
             title,
             year: None,
             source: None,
