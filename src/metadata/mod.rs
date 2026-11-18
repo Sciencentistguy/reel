@@ -1,5 +1,6 @@
 //! Online metadata sources and candidate scoring.
 
+use std::fmt;
 use std::thread;
 use std::time::Duration;
 
@@ -26,7 +27,38 @@ pub struct Candidate {
     /// Running time in minutes; search results usually leave it out.
     pub runtime: Option<u32>,
     /// How many episodes a show has; searches leave it out.
-    pub episode_count: Option<usize>,
+    pub episode_count: Option<EpisodeCount>,
+}
+
+/// A show's episode count, with specials (season 0) counted apart from the regular episodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EpisodeCount {
+    pub episodes: usize,
+    pub specials: usize,
+}
+
+impl EpisodeCount {
+    pub fn of(list: &[EpisodeInfo]) -> Self {
+        let specials = list.iter().filter(|episode| episode.season == 0).count();
+        EpisodeCount {
+            episodes: list.len() - specials,
+            specials,
+        }
+    }
+}
+
+impl fmt::Display for EpisodeCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let plural = |count: usize, noun: &str| match count {
+            1 => format!("1 {noun}"),
+            count => format!("{count} {noun}s"),
+        };
+        f.write_str(&plural(self.episodes, "episode"))?;
+        if self.specials > 0 {
+            write!(f, ", {}", plural(self.specials, "special"))?;
+        }
+        Ok(())
+    }
 }
 
 /// A file's running time, to compare with a candidate's.
@@ -762,6 +794,24 @@ mod tests {
         assert_eq!(wait(1, &Err(ureq::Error::HostNotFound)), None);
         assert_eq!(wait(1, &response(500, None)), None);
         assert_eq!(wait(1, &response(200, None)), None);
+    }
+
+    #[test]
+    fn episode_counts_list_specials_separately() {
+        let episode = |season| EpisodeInfo {
+            season,
+            number: 1,
+            title: None,
+            air_date: None,
+        };
+        let count = |seasons: &[u32]| {
+            let list: Vec<_> = seasons.iter().map(|&season| episode(season)).collect();
+            EpisodeCount::of(&list).to_string()
+        };
+        assert_eq!(count(&[1, 1, 1, 1, 1, 0, 0]), "5 episodes, 2 specials");
+        assert_eq!(count(&[1, 0]), "1 episode, 1 special");
+        assert_eq!(count(&[1, 2]), "2 episodes");
+        assert_eq!(count(&[]), "0 episodes");
     }
 
     #[test]

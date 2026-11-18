@@ -13,7 +13,9 @@ use crate::commands::human_duration;
 use crate::config::{Config, Operation};
 use crate::fileops;
 use crate::library::Library;
-use crate::metadata::{self, Candidate, EpisodeInfo, Length, MovieSource, ShowSource};
+use crate::metadata::{
+    self, Candidate, EpisodeCount, EpisodeInfo, Length, MovieSource, ShowSource,
+};
 use crate::model::{Item, Kind, MediaInfo};
 use crate::naming;
 use crate::parse::{self, Parsed};
@@ -420,7 +422,7 @@ fn with_episode_lists(
             }
             match source.episodes(&candidate.id, None) {
                 Ok(episodes) => {
-                    candidate.episode_count = Some(episodes.len());
+                    candidate.episode_count = Some(EpisodeCount::of(&episodes));
                     let penalty = missing_episode_penalty(files, &episodes);
                     ((distance + penalty).min(1.0), candidate)
                 }
@@ -470,11 +472,9 @@ fn print_candidate(label: &str, candidate: &Candidate, distance: f64, in_library
     let runtime = candidate.runtime.map_or(String::new(), |minutes| {
         format!(", {}", human_duration(f64::from(minutes) * 60.0))
     });
-    let episodes = match candidate.episode_count {
-        Some(1) => ", 1 episode".to_string(),
-        Some(count) => format!(", {count} episodes"),
-        None => String::new(),
-    };
+    let episodes = candidate
+        .episode_count
+        .map_or(String::new(), |count| format!(", {count}"));
     println!(
         "  {label} {} [{}-{}] ({}{runtime}{episodes}){known}",
         describe_candidate(candidate),
@@ -1575,7 +1575,13 @@ mod tests {
             panic!("expected a confident match");
         };
         assert_eq!(chosen.id, "long");
-        assert_eq!(chosen.episode_count, Some(52));
+        assert_eq!(
+            chosen.episode_count,
+            Some(EpisodeCount {
+                episodes: 52,
+                specials: 0
+            })
+        );
         assert_eq!(*source.listed.borrow(), ["mini", "long"]);
     }
 
