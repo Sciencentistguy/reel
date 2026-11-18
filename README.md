@@ -146,7 +146,7 @@ show up in `reel unmatched`. Specials are often listed with a placeholder runtim
 When you're there to answer, a file that can't be placed is asked about instead of skipped: give
 the episode it really is (`s13e05`, `13x05`, `s2006e02`, or an air date such as `2006-02-05`), or
 type words from its title or a year to search the show's episode list, which lists each match's
-air date and runtime. A blank answer skips the file. This is how films in an anthology series, or
+air date and runtime. A blank answer skips the file; Ctrl-C stops the import. This is how films in an anthology series, or
 files numbered differently from the source, find their place. `reel sync` applies the same check to items already in the library,
 leaving any that fail untouched and listing them.
 

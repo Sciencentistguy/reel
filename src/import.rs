@@ -860,22 +860,31 @@ fn apply_episode(
     true
 }
 
+/// What became of an episode file that `place_episode` was asked to place.
+#[derive(Debug, PartialEq)]
+enum Placement {
+    Placed,
+    Skipped,
+    /// The user interrupted the prompt (Ctrl-C or Ctrl-D) to stop importing altogether.
+    Aborted,
+}
+
 /// Places an episode file as its name says or, failing that and given a way to `ask`, as the
 /// episode the user names: by number (`s13e05`, `13x05`) or air date, after searching the
-/// episode titles if they like. Returns whether the file was placed.
+/// episode titles if they like.
 fn place_episode(
     item: &mut Item,
     parsed: &Parsed,
     episodes: &[EpisodeInfo],
     duration: Option<f64>,
     ask: Option<impl Fn(&str) -> Result<Option<String>>>,
-) -> Result<bool> {
+) -> Result<Placement> {
     if apply_episode(item, parsed, episodes, duration) {
-        return Ok(true);
+        return Ok(Placement::Placed);
     }
     let skip = || {
         println!("    {}", paint("2", "Skipped."));
-        Ok(false)
+        Ok(Placement::Skipped)
     };
     let Some(ask) = ask.filter(|_| !episodes.is_empty()) else {
         return skip();
@@ -889,9 +898,12 @@ fn place_episode(
     );
     println!("    {}", paint("2", "Leave blank to skip."));
     loop {
-        let Some(answer) = ask("    episode> ")?.filter(|answer| !answer.is_empty()) else {
-            return skip();
+        let Some(answer) = ask("    episode> ")? else {
+            return Ok(Placement::Aborted);
         };
+        if answer.is_empty() {
+            return skip();
+        }
         let given = parse::parse_name(&format!("Show {answer}"));
         if given.air_date.is_some() || (given.season.is_some() && given.episode.is_some()) {
             let mut named = parsed.clone();
@@ -900,7 +912,7 @@ fn place_episode(
             if apply_episode(item, &named, episodes, duration) {
                 let code = item.episode_code().unwrap_or_default();
                 println!("    {}", paint("32", &format!("Placed as {code}.")));
-                return Ok(true);
+                return Ok(Placement::Placed);
             }
             continue;
         }
@@ -1263,7 +1275,7 @@ fn run_with(
     };
 
     let mut can_measure = config.import.probe;
-    for mut group in group(pending) {
+    'groups: for mut group in group(pending) {
         let label = match group.kind {
             Kind::Movie => "film",
             Kind::Episode => "show",
@@ -1328,16 +1340,19 @@ fn run_with(
                         .as_ref()
                         .and_then(|media| media.duration)
                         .filter(|_| !options.skip_length_check);
-                    let placed = place_episode(
+                    match place_episode(
                         &mut item,
                         &file.parsed,
                         &episodes,
                         duration,
                         interactive.then_some(prompt),
-                    )?;
-                    if !placed {
-                        importer.summary.skipped += 1;
-                        continue;
+                    )? {
+                        Placement::Placed => {}
+                        Placement::Skipped => {
+                            importer.summary.skipped += 1;
+                            continue;
+                        }
+                        Placement::Aborted => break 'groups,
                     }
                 }
             }
@@ -2024,16 +2039,27 @@ mod tests {
             },
         ];
         let parsed = parse::parse_name("Summer Solstice (2006) - s01e01");
-        let place = |answers: &[&str]| {
-            let answers = RefCell::new(answers.iter().map(|a| a.to_string()).collect::<Vec<_>>());
-            let ask = |_: &str| Ok(Some(answers.borrow_mut().remove(0)));
+        let attempt = |answers: &[Option<&str>]| {
+            let answers = RefCell::new(
+                answers
+                    .iter()
+                    .map(|a| a.map(String::from))
+                    .collect::<Vec<_>>(),
+            );
+            let ask = |_: &str| Ok(answers.borrow_mut().remove(0));
             let mut item = Item::new(
                 Kind::Episode,
                 "/in/s.mkv".into(),
                 "Rosamunde Pilcher".into(),
             );
-            let placed = place_episode(&mut item, &parsed, &anthology, Some(5400.0), Some(ask));
-            placed.unwrap().then_some(item)
+            let placement =
+                place_episode(&mut item, &parsed, &anthology, Some(5400.0), Some(ask)).unwrap();
+            (placement, item)
+        };
+        let place = |answers: &[&str]| {
+            let answers: Vec<_> = answers.iter().copied().map(Some).collect();
+            let (placement, item) = attempt(&answers);
+            (placement == Placement::Placed).then_some(item)
         };
 
         let item = place(&["solstice", "s13e05"]).expect("placed by number after a search");
@@ -2047,6 +2073,12 @@ mod tests {
             place(&["s09e09", ""]).is_none(),
             "unlisted answers ask again"
         );
+        assert_eq!(attempt(&[Some("")]).0, Placement::Skipped);
+        assert_eq!(
+            attempt(&[Some("solstice"), None]).0,
+            Placement::Aborted,
+            "Ctrl-C stops importing rather than skipping"
+        );
 
         let mut item = Item::new(
             Kind::Episode,
@@ -2054,7 +2086,10 @@ mod tests {
             "Rosamunde Pilcher".into(),
         );
         let never = None::<fn(&str) -> Result<Option<String>>>;
-        assert!(!place_episode(&mut item, &parsed, &anthology, None, never).unwrap());
+        assert_eq!(
+            place_episode(&mut item, &parsed, &anthology, None, never).unwrap(),
+            Placement::Skipped
+        );
     }
 
     #[test]
