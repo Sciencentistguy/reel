@@ -140,7 +140,8 @@ Each episode file's running time is also checked against the episode it is numbe
 round episode runtimes and often give nominal ones, so only a file shorter than two thirds or longer
 than half again as long as its episodes (summed, for a multi-episode file) is rejected: a short
 in a special's place, or two episodes filed as one. Such files are skipped with a warning and
-show up in `reel unmatched`.
+show up in `reel unmatched`. Specials are often listed with a placeholder runtime, so `import`,
+`rescan` and `sync` take `--skip-length-check` to place files whatever their length.
 
 When you're there to answer, a file that can't be placed is asked about instead of skipped: give
 the episode it really is (`s13e05`, `13x05`, `s2006e02`, or an air date such as `2006-02-05`), or

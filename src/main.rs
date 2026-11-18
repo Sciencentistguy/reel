@@ -280,6 +280,25 @@ mod tests {
     }
 
     #[test]
+    fn the_length_check_can_be_skipped() {
+        match parse(&["import", "--skip-length-check", "x"])
+            .unwrap()
+            .command
+        {
+            Command::Import(options) => assert!(options.skip_length_check),
+            _ => panic!("expected import"),
+        }
+        match parse(&["rescan", "--skip-length-check"]).unwrap().command {
+            Command::Rescan(options) => assert!(options.skip_length_check),
+            _ => panic!("expected rescan"),
+        }
+        match parse(&["sync", "--skip-length-check"]).unwrap().command {
+            Command::Sync(options) => assert!(options.skip_length_check),
+            _ => panic!("expected sync"),
+        }
+    }
+
+    #[test]
     fn required_arguments_are_enforced() {
         assert!(parse(&[]).is_err());
         assert!(parse(&["import"]).is_err());

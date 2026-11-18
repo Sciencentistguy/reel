@@ -62,6 +62,9 @@ pub struct Options {
     /// Auto-select confident matches even if the configuration says to be timid.
     #[arg(long)]
     pub no_timid: bool,
+    /// Place episode files even when their running time doesn't fit the episode's runtime.
+    #[arg(long)]
+    pub skip_length_check: bool,
 }
 
 /// Options for `reel rescan`, which adopts files already in the library folders.
@@ -81,6 +84,9 @@ pub struct Rescan {
     /// Auto-select confident matches even if the configuration says to be timid.
     #[arg(long)]
     pub no_timid: bool,
+    /// Place episode files even when their running time doesn't fit the episode's runtime.
+    #[arg(long)]
+    pub skip_length_check: bool,
 }
 
 struct Pending {
@@ -1195,6 +1201,7 @@ fn rescan_options(config: &Config, rescan: Rescan) -> Result<Options> {
         kind: None,
         timid: rescan.timid,
         no_timid: rescan.no_timid,
+        skip_length_check: rescan.skip_length_check,
     })
 }
 
@@ -1317,7 +1324,10 @@ fn run_with(
                     item.part = file.parsed.part;
                 }
                 Kind::Episode => {
-                    let duration = media.as_ref().and_then(|media| media.duration);
+                    let duration = media
+                        .as_ref()
+                        .and_then(|media| media.duration)
+                        .filter(|_| !options.skip_length_check);
                     let placed = place_episode(
                         &mut item,
                         &file.parsed,
@@ -2246,6 +2256,7 @@ mod tests {
                 pretend,
                 timid: false,
                 no_timid: false,
+                skip_length_check: false,
             };
             let options = rescan_options(&self.config, rescan)?;
             run_with(
@@ -2277,6 +2288,7 @@ mod tests {
             kind: None,
             timid: false,
             no_timid: false,
+            skip_length_check: false,
         }
     }
 

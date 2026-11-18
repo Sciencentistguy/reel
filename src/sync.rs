@@ -20,6 +20,9 @@ pub struct Options {
     /// Update the database but leave files where they are.
     #[arg(short = 'M', long)]
     pub no_move: bool,
+    /// Update episodes even when their running time doesn't fit the episode's runtime.
+    #[arg(long)]
+    pub skip_length_check: bool,
     pub query: Vec<String>,
 }
 
@@ -65,7 +68,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
 
         for item in &mut items {
             let before = item.clone();
-            if let Err(misfit) = apply(item, &record) {
+            if let Err(misfit) = apply(item, &record, !options.skip_length_check) {
                 eprintln!("warning: {}: {misfit}", item.path.display());
                 misfits += 1;
                 continue;
@@ -133,17 +136,29 @@ fn fetch_show(source: &dyn ShowSource, id: &str, items: &[Item]) -> Result<Recor
 }
 
 /// Brings an item's metadata in line with what its source now says, or explains why the source's
-/// episode can't be this file, leaving the item alone.
-fn apply(item: &mut Item, record: &Record) -> Result<(), String> {
+/// episode can't be this file, leaving the item alone. `check_length` rejects an episode whose
+/// file runs too long or short for it.
+fn apply(item: &mut Item, record: &Record, check_length: bool) -> Result<(), String> {
     if item.kind == Kind::Episode {
-        apply_episode(item, &record.episodes)?;
+        apply_episode(item, &record.episodes, check_length)?;
     }
     item.title = record.work.title.clone();
     item.year = record.work.year.or(item.year);
     Ok(())
 }
 
-fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) -> Result<(), String> {
+fn apply_episode(
+    item: &mut Item,
+    episodes: &[EpisodeInfo],
+    length_checked: bool,
+) -> Result<(), String> {
+    let fits = |item: &Item, found: &[&EpisodeInfo]| {
+        if length_checked {
+            check_length(item, found)
+        } else {
+            Ok(())
+        }
+    };
     if item.date_based {
         let Some(found) = episodes
             .iter()
@@ -151,7 +166,7 @@ fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) -> Result<(), String
         else {
             return Ok(());
         };
-        check_length(item, &[found])?;
+        fits(item, &[found])?;
         item.season = Some(found.season);
         item.episode = Some(found.number);
         item.episode_title = found.title.clone().or(item.episode_title.take());
@@ -173,7 +188,7 @@ fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) -> Result<(), String
         return Ok(());
     };
     if found.len() == (first..=last).count() {
-        check_length(item, &found)?;
+        fits(item, &found)?;
     }
     let mut titles: Vec<&str> = Vec::new();
     for title in found.iter().filter_map(|episode| episode.title.as_deref()) {
@@ -309,7 +324,7 @@ mod tests {
             work: work("New", None),
             episodes: Vec::new(),
         };
-        apply(&mut film, &record).unwrap();
+        apply(&mut film, &record, true).unwrap();
         assert_eq!((film.title.as_str(), film.year), ("New", Some(1995)));
     }
 
@@ -328,26 +343,26 @@ mod tests {
         let mut single = item(Kind::Episode, Some("1"));
         (single.season, single.episode) = (Some(1), Some(1));
         single.episode_title = Some("TBA".into());
-        apply(&mut single, &record).unwrap();
+        apply(&mut single, &record, true).unwrap();
         assert_eq!(single.title, "Show");
         assert_eq!(single.episode_title.as_deref(), Some("Pilot"));
         assert_eq!(single.air_date.as_deref(), Some("2020-01-01"));
 
         let mut double = item(Kind::Episode, Some("1"));
         (double.season, double.episode, double.episode_end) = (Some(1), Some(2), Some(3));
-        apply(&mut double, &record).unwrap();
+        apply(&mut double, &record, true).unwrap();
         assert_eq!(double.episode_title.as_deref(), Some("Part One & Part Two"));
 
         let mut untitled = item(Kind::Episode, Some("1"));
         (untitled.season, untitled.episode) = (Some(1), Some(4));
         untitled.episode_title = Some("Kept".into());
-        apply(&mut untitled, &record).unwrap();
+        apply(&mut untitled, &record, true).unwrap();
         assert_eq!(untitled.episode_title.as_deref(), Some("Kept"));
 
         let mut unknown = item(Kind::Episode, Some("1"));
         (unknown.season, unknown.episode) = (Some(9), Some(1));
         unknown.air_date = Some("1999-01-01".into());
-        apply(&mut unknown, &record).unwrap();
+        apply(&mut unknown, &record, true).unwrap();
         assert_eq!(unknown.air_date.as_deref(), Some("1999-01-01"));
     }
 
@@ -360,7 +375,7 @@ mod tests {
         let mut daily = item(Kind::Episode, Some("1"));
         daily.date_based = true;
         daily.air_date = Some("2024-03-01".into());
-        apply(&mut daily, &record).unwrap();
+        apply(&mut daily, &record, true).unwrap();
         assert_eq!((daily.season, daily.episode), (Some(2024), Some(37)));
         assert_eq!(daily.episode_title.as_deref(), Some("Guest"));
     }
@@ -377,12 +392,20 @@ mod tests {
         (short.season, short.episode) = (Some(5), Some(28));
         short.media.duration = Some(670.0);
         let before = short.clone();
-        let error = apply(&mut short, &record).unwrap_err();
+        let error = apply(&mut short, &record, true).unwrap_err();
         assert_eq!(error, "runs 0h 11m but s05e28 Change Your Mind runs 0h 45m");
         assert_eq!(short, before, "nothing is applied");
 
+        let mut unchecked = short.clone();
+        apply(&mut unchecked, &record, false).unwrap();
+        assert_eq!(
+            unchecked.episode_title.as_deref(),
+            Some("Change Your Mind"),
+            "the length check can be skipped"
+        );
+
         short.media.duration = Some(2710.0);
-        apply(&mut short, &record).unwrap();
+        apply(&mut short, &record, true).unwrap();
         assert_eq!(short.episode_title.as_deref(), Some("Change Your Mind"));
     }
 
