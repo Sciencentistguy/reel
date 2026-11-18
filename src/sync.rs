@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::commands::relocate;
+use crate::commands::{human_duration, relocate};
 use crate::config::Config;
+use crate::import::describe_episodes;
 use crate::library::Library;
 use crate::metadata::{self, Candidate, EpisodeInfo, MovieSource, ShowSource};
 use crate::model::{Item, Kind};
@@ -32,7 +33,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
     let mut movies: Option<Box<dyn MovieSource>> = None;
     let mut shows: HashMap<String, Box<dyn ShowSource>> = HashMap::new();
     let mut claimed = HashSet::new();
-    let (mut changed, mut moved, mut failed) = (0, 0, 0);
+    let (mut changed, mut moved, mut failed, mut misfits) = (0, 0, 0, 0);
 
     for ((kind, source, id), mut items) in works(library.query(&Query::parse(&options.query)?)?) {
         let record = match kind {
@@ -64,7 +65,11 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
 
         for item in &mut items {
             let before = item.clone();
-            apply(item, &record);
+            if let Err(misfit) = apply(item, &record) {
+                eprintln!("warning: {}: {misfit}", item.path.display());
+                misfits += 1;
+                continue;
+            }
             let differences = differences(&before, item);
             if !differences.is_empty() {
                 println!("{}", before.path.display());
@@ -92,6 +97,12 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
         print!(" Could not fetch metadata for {failed} item(s).");
     }
     println!();
+    if misfits > 0 {
+        println!(
+            "{misfits} item(s) run too long or short to be the episode they are numbered as, so were \
+             left alone; check their numbering, then `reel remove` and `reel rescan` them."
+        );
+    }
     Ok(())
 }
 
@@ -121,31 +132,34 @@ fn fetch_show(source: &dyn ShowSource, id: &str, items: &[Item]) -> Result<Recor
     Ok(Record { work, episodes })
 }
 
-/// Brings an item's metadata in line with what its source now says.
-fn apply(item: &mut Item, record: &Record) {
+/// Brings an item's metadata in line with what its source now says, or explains why the source's
+/// episode can't be this file, leaving the item alone.
+fn apply(item: &mut Item, record: &Record) -> Result<(), String> {
+    if item.kind == Kind::Episode {
+        apply_episode(item, &record.episodes)?;
+    }
     item.title = record.work.title.clone();
     item.year = record.work.year.or(item.year);
-    if item.kind == Kind::Episode {
-        apply_episode(item, &record.episodes);
-    }
+    Ok(())
 }
 
-fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) {
+fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) -> Result<(), String> {
     if item.date_based {
         let Some(found) = episodes
             .iter()
             .find(|episode| episode.air_date.is_some() && episode.air_date == item.air_date)
         else {
-            return;
+            return Ok(());
         };
+        check_length(item, &[found])?;
         item.season = Some(found.season);
         item.episode = Some(found.number);
         item.episode_title = found.title.clone().or(item.episode_title.take());
-        return;
+        return Ok(());
     }
 
     let (Some(season), Some(first)) = (item.season, item.episode) else {
-        return;
+        return Ok(());
     };
     let last = item.episode_end.unwrap_or(first);
     let found: Vec<&EpisodeInfo> = (first..=last)
@@ -156,8 +170,11 @@ fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) {
         })
         .collect();
     let Some(opening) = found.first() else {
-        return;
+        return Ok(());
     };
+    if found.len() == (first..=last).count() {
+        check_length(item, &found)?;
+    }
     let mut titles: Vec<&str> = Vec::new();
     for title in found.iter().filter_map(|episode| episode.title.as_deref()) {
         if !titles.contains(&title) {
@@ -170,6 +187,20 @@ fn apply_episode(item: &mut Item, episodes: &[EpisodeInfo]) {
     if opening.air_date.is_some() {
         item.air_date = opening.air_date.clone();
     }
+    Ok(())
+}
+
+/// Fails when the item's file runs too long or short to be `episodes`.
+fn check_length(item: &Item, episodes: &[&EpisodeInfo]) -> Result<(), String> {
+    if metadata::episodes_fit(item.media.duration, episodes) {
+        return Ok(());
+    }
+    Err(format!(
+        "runs {} but {} runs {}",
+        human_duration(item.media.duration.unwrap_or_default()),
+        describe_episodes(episodes),
+        human_duration(f64::from(metadata::episodes_runtime(episodes).unwrap_or_default()) * 60.0),
+    ))
 }
 
 /// The metadata fields that differ between two versions of an item, as `field: old -> new`.
@@ -236,6 +267,7 @@ mod tests {
             number,
             title: title.map(Into::into),
             air_date: Some(air_date.into()),
+            runtime: None,
         }
     }
 
@@ -277,7 +309,7 @@ mod tests {
             work: work("New", None),
             episodes: Vec::new(),
         };
-        apply(&mut film, &record);
+        apply(&mut film, &record).unwrap();
         assert_eq!((film.title.as_str(), film.year), ("New", Some(1995)));
     }
 
@@ -296,26 +328,26 @@ mod tests {
         let mut single = item(Kind::Episode, Some("1"));
         (single.season, single.episode) = (Some(1), Some(1));
         single.episode_title = Some("TBA".into());
-        apply(&mut single, &record);
+        apply(&mut single, &record).unwrap();
         assert_eq!(single.title, "Show");
         assert_eq!(single.episode_title.as_deref(), Some("Pilot"));
         assert_eq!(single.air_date.as_deref(), Some("2020-01-01"));
 
         let mut double = item(Kind::Episode, Some("1"));
         (double.season, double.episode, double.episode_end) = (Some(1), Some(2), Some(3));
-        apply(&mut double, &record);
+        apply(&mut double, &record).unwrap();
         assert_eq!(double.episode_title.as_deref(), Some("Part One & Part Two"));
 
         let mut untitled = item(Kind::Episode, Some("1"));
         (untitled.season, untitled.episode) = (Some(1), Some(4));
         untitled.episode_title = Some("Kept".into());
-        apply(&mut untitled, &record);
+        apply(&mut untitled, &record).unwrap();
         assert_eq!(untitled.episode_title.as_deref(), Some("Kept"));
 
         let mut unknown = item(Kind::Episode, Some("1"));
         (unknown.season, unknown.episode) = (Some(9), Some(1));
         unknown.air_date = Some("1999-01-01".into());
-        apply(&mut unknown, &record);
+        apply(&mut unknown, &record).unwrap();
         assert_eq!(unknown.air_date.as_deref(), Some("1999-01-01"));
     }
 
@@ -328,9 +360,30 @@ mod tests {
         let mut daily = item(Kind::Episode, Some("1"));
         daily.date_based = true;
         daily.air_date = Some("2024-03-01".into());
-        apply(&mut daily, &record);
+        apply(&mut daily, &record).unwrap();
         assert_eq!((daily.season, daily.episode), (Some(2024), Some(37)));
         assert_eq!(daily.episode_title.as_deref(), Some("Guest"));
+    }
+
+    #[test]
+    fn episodes_too_long_or_short_for_their_numbering_are_left_alone() {
+        let mut change = episode(5, 28, Some("Change Your Mind"), "2019-01-21");
+        change.runtime = Some(45);
+        let record = Record {
+            work: work("Steven Universe", Some(2013)),
+            episodes: vec![change],
+        };
+        let mut short = item(Kind::Episode, Some("1"));
+        (short.season, short.episode) = (Some(5), Some(28));
+        short.media.duration = Some(670.0);
+        let before = short.clone();
+        let error = apply(&mut short, &record).unwrap_err();
+        assert_eq!(error, "runs 0h 11m but s05e28 Change Your Mind runs 0h 45m");
+        assert_eq!(short, before, "nothing is applied");
+
+        short.media.duration = Some(2710.0);
+        apply(&mut short, &record).unwrap();
+        assert_eq!(short.episode_title.as_deref(), Some("Change Your Mind"));
     }
 
     #[test]

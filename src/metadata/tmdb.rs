@@ -62,6 +62,7 @@ struct Episode {
     episode_number: u32,
     name: Option<String>,
     air_date: Option<String>,
+    runtime: Option<u32>,
 }
 
 impl From<Movie> for Candidate {
@@ -162,6 +163,7 @@ impl Tmdb {
                 number: episode.episode_number,
                 title: episode.name.filter(|name| !name.is_empty()),
                 air_date: episode.air_date.filter(|date| !date.is_empty()),
+                runtime: episode.runtime.filter(|&minutes| minutes > 0),
             })
             .collect())
     }
@@ -479,7 +481,7 @@ mod tests {
                  "air_date": "2009-01-01"}]}"#),
             "/tv/1/season/1" => ok(r#"{"episodes": [
                 {"season_number": 1, "episode_number": 1, "name": "", "air_date": null},
-                {"season_number": 1, "episode_number": 2, "name": "Two", "air_date": ""}]}"#),
+                {"season_number": 1, "episode_number": 2, "name": "Two", "air_date": "", "runtime": 0}]}"#),
             "/tv/2" => ok(r#"{"id": 2, "name": "Bare"}"#),
             _ => (404, "{}".into()),
         })
@@ -501,18 +503,21 @@ mod tests {
                     number: 1,
                     title: Some("Special".into()),
                     air_date: Some("2009-01-01".into()),
+                    runtime: None,
                 },
                 EpisodeInfo {
                     season: 1,
                     number: 1,
                     title: None,
                     air_date: None,
+                    runtime: None,
                 },
                 EpisodeInfo {
                     season: 1,
                     number: 2,
                     title: Some("Two".into()),
                     air_date: None,
+                    runtime: None,
                 },
             ]
         );

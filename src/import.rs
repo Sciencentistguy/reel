@@ -774,8 +774,14 @@ fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<E
     seasons.into_iter().flat_map(|s| fetch(Some(s))).collect()
 }
 
-/// Fills in the episode fields of `item`. Returns `false` when the file cannot be placed.
-fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> bool {
+/// Fills in the episode fields of `item` from the episodes its name gives, checking `duration`
+/// (in seconds) against their runtimes. Returns `false` when the file cannot be placed.
+fn apply_episode(
+    item: &mut Item,
+    parsed: &Parsed,
+    episodes: &[EpisodeInfo],
+    duration: Option<f64>,
+) -> bool {
     item.season = parsed.season;
     item.episode = parsed.episode;
     item.episode_end = parsed.episode_end;
@@ -790,6 +796,9 @@ fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> 
             );
             return false;
         };
+        if !fits(item, duration, &[found]) {
+            return false;
+        }
         item.season = Some(found.season);
         item.episode = Some(found.number);
         item.episode_title = found.title.clone();
@@ -800,9 +809,9 @@ fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> 
         return false;
     };
     let last = parsed.episode_end.unwrap_or(first);
-    let mut titles: Vec<&str> = Vec::new();
+    let mut found = Vec::new();
     for number in first..=last {
-        let Some(found) = episodes
+        let Some(episode) = episodes
             .iter()
             .find(|e| e.season == season && e.number == number)
         else {
@@ -812,17 +821,52 @@ fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> 
             );
             return false;
         };
-        if let Some(title) = found.title.as_deref()
-            && !titles.contains(&title)
-        {
+        found.push(episode);
+    }
+    if !fits(item, duration, &found) {
+        return false;
+    }
+    let mut titles: Vec<&str> = Vec::new();
+    for title in found.iter().filter_map(|episode| episode.title.as_deref()) {
+        if !titles.contains(&title) {
             titles.push(title);
-        }
-        if number == first {
-            item.air_date = found.air_date.clone();
         }
     }
     item.episode_title = Some(titles.join(" & ")).filter(|t| !t.is_empty());
+    item.air_date = found[0].air_date.clone();
     true
+}
+
+/// Whether a file running `duration` seconds can be `episodes`, warning when it can't.
+fn fits(item: &Item, duration: Option<f64>, episodes: &[&EpisodeInfo]) -> bool {
+    if metadata::episodes_fit(duration, episodes) {
+        return true;
+    }
+    eprintln!(
+        "  warning: {} runs {} but {} runs {}; skipping",
+        item.path.display(),
+        human_duration(duration.unwrap_or_default()),
+        describe_episodes(episodes),
+        human_duration(f64::from(metadata::episodes_runtime(episodes).unwrap_or_default()) * 60.0),
+    );
+    false
+}
+
+/// `s05e28 Change Your Mind`, or `s01e01-e02` for several.
+pub fn describe_episodes(episodes: &[&EpisodeInfo]) -> String {
+    let (Some(first), Some(last)) = (episodes.first(), episodes.last()) else {
+        return String::new();
+    };
+    let mut text = format!("s{:02}e{:02}", first.season, first.number);
+    if last.number != first.number {
+        text += &format!("-e{:02}", last.number);
+    }
+    if let [only] = episodes
+        && let Some(title) = &only.title
+    {
+        text += &format!(" {title}");
+    }
+    text
 }
 
 struct Importer<'a> {
@@ -1142,6 +1186,7 @@ fn run_with(
         };
         for (index, file) in group.files.iter().enumerate() {
             let mut item = base_item(&group, file, &candidate);
+            let media = importer.media(&mut probes, index);
             match group.kind {
                 Kind::Movie => {
                     item.edition = edition
@@ -1150,13 +1195,13 @@ fn run_with(
                     item.part = file.parsed.part;
                 }
                 Kind::Episode => {
-                    if !apply_episode(&mut item, &file.parsed, &episodes) {
+                    let duration = media.as_ref().and_then(|media| media.duration);
+                    if !apply_episode(&mut item, &file.parsed, &episodes, duration) {
                         importer.summary.skipped += 1;
                         continue;
                     }
                 }
             }
-            let media = importer.media(&mut probes, index);
             match importer.import(item, file, media) {
                 Ok(true) => importer.summary.imported += 1,
                 Ok(false) => importer.summary.skipped += 1,
@@ -1221,6 +1266,7 @@ mod tests {
             number,
             title: Some(title.to_string()),
             air_date: Some(date.to_string()),
+            runtime: None,
         };
         vec![
             episode(1, 1, "Pilot (1)", "2010-01-01"),
@@ -1232,7 +1278,7 @@ mod tests {
     fn applied(name: &str, episodes: &[EpisodeInfo]) -> Option<Item> {
         let parsed = parse::parse_name(name);
         let mut item = Item::new(Kind::Episode, "/in/file.mkv".into(), parsed.title.clone());
-        apply_episode(&mut item, &parsed, episodes).then_some(item)
+        apply_episode(&mut item, &parsed, episodes, None).then_some(item)
     }
 
     #[test]
@@ -1344,6 +1390,7 @@ mod tests {
                 number: 1,
                 title: Some("Title".into()),
                 air_date: None,
+                runtime: None,
             }])
         }
     }
@@ -1675,6 +1722,7 @@ mod tests {
                         number,
                         title: None,
                         air_date: None,
+                        runtime: None,
                     })
                 })
                 .collect())
@@ -1771,6 +1819,7 @@ mod tests {
                     number,
                     title: None,
                     air_date: None,
+                    runtime: None,
                 })
                 .collect()
         };
@@ -1790,6 +1839,31 @@ mod tests {
         assert_eq!(missing_episode_penalty(&dated, &by_date), 0.52);
         by_date[0].air_date = Some("2011-11-15".into());
         assert_eq!(missing_episode_penalty(&dated, &by_date), 0.0);
+    }
+
+    #[test]
+    fn episodes_too_long_or_short_for_their_numbering_are_skipped() {
+        let runs = |number, minutes| EpisodeInfo {
+            season: 5,
+            number,
+            title: None,
+            air_date: None,
+            runtime: Some(minutes),
+        };
+        let listed = [runs(27, 10), runs(28, 45)];
+        let place = |name: &str, seconds| {
+            let parsed = parse::parse_name(name);
+            let mut item = Item::new(Kind::Episode, "/in/file.mkv".into(), parsed.title.clone());
+            apply_episode(&mut item, &parsed, &listed, Some(seconds))
+        };
+        assert!(place("Show S05E27", 670.0));
+        assert!(!place("Show S05E28", 670.0), "a short is not the special");
+        assert!(place("Show S05E28", 2710.0));
+        assert!(
+            !place("Show S05E27-E28", 670.0),
+            "both episodes must fit in the file"
+        );
+        assert!(place("Show S05E27-E28", 3300.0));
     }
 
     #[test]
@@ -2057,6 +2131,7 @@ mod tests {
             number: 3,
             title: Some("Some Title".into()),
             air_date: None,
+            runtime: None,
         }];
         env.import(&options(&env, &["in"])).unwrap();
 
@@ -2262,6 +2337,7 @@ mod tests {
             number: 1,
             title: None,
             air_date: None,
+            runtime: None,
         }];
         env.rescan(&[], false).unwrap();
 

@@ -136,6 +136,13 @@ shares a name with. Episode counts, and how many files are unmatched (`3 file(s)
 shown beside the candidates. If you choose a show anyway, files whose episodes it doesn't list are
 skipped.
 
+Each episode file's running time is also checked against the episode it is numbered as. Sources
+round episode runtimes and often give nominal ones, so only a file shorter than two thirds or longer
+than half again as long as its episodes (summed, for a multi-episode file) is rejected: a short
+in a special's place, or two episodes filed as one. Such files are skipped with a warning and
+show up in `reel unmatched`. `reel sync` applies the same check to items already in the library,
+leaving any that fail untouched and listing them.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the

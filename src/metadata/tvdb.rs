@@ -78,6 +78,7 @@ struct Episode {
     number: Option<u32>,
     name: Option<String>,
     aired: Option<String>,
+    runtime: Option<u32>,
 }
 
 fn series_url(id: &str) -> String {
@@ -274,6 +275,7 @@ impl ShowSource for Tvdb {
                     number: episode.number?,
                     title: episode.name.filter(|name| !name.is_empty()),
                     air_date: episode.aired.filter(|date| !date.is_empty()),
+                    runtime: episode.runtime.filter(|&minutes| minutes > 0),
                 })
             }));
             if empty || response.links.and_then(|links| links.next).is_none() {
@@ -549,7 +551,7 @@ mod tests {
             "/login" => login(),
             "/series/1/episodes/default/eng" => match request.param("page").as_deref() {
                 Some("0") => ok(r#"{"data": {"episodes": [
-                        {"seasonNumber": 1, "number": 1, "name": "One", "aired": "2005-01-01"},
+                        {"seasonNumber": 1, "number": 1, "name": "One", "aired": "2005-01-01", "runtime": 22},
                         {"seasonNumber": 1, "number": null, "name": "Unnumbered"},
                         {"number": 9, "name": "Seasonless"}]},
                     "links": {"next": "https://example.invalid/?page=1"}}"#),
@@ -580,12 +582,14 @@ mod tests {
                     number: 1,
                     title: Some("One".into()),
                     air_date: Some("2005-01-01".into()),
+                    runtime: Some(22),
                 },
                 EpisodeInfo {
                     season: 1,
                     number: 2,
                     title: None,
                     air_date: None,
+                    runtime: None,
                 },
             ]
         );

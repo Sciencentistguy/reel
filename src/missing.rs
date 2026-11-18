@@ -169,6 +169,7 @@ mod tests {
             number,
             title: None,
             air_date: air_date.map(Into::into),
+            runtime: None,
         }
     }
 

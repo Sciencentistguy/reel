@@ -75,6 +75,8 @@ pub struct EpisodeInfo {
     pub number: u32,
     pub title: Option<String>,
     pub air_date: Option<String>,
+    /// Running time in minutes, as the source rounds it.
+    pub runtime: Option<u32>,
 }
 
 pub trait MovieSource {
@@ -278,6 +280,26 @@ pub fn length_penalty(length: Option<Length>, candidate: &Candidate) -> f64 {
     } else {
         penalty
     }
+}
+
+/// How far a file's running time may stray from its episodes' before it can't be them, as a
+/// ratio either way. Sources round episode runtimes and often give nominal ones (a 22-minute
+/// episode listed as 30), so only a gross difference counts: a short in a double episode's
+/// place, or two episodes in a file numbered as one.
+const EPISODE_LENGTH_RATIO: f64 = 1.5;
+
+/// The episodes' combined runtime in minutes, when the source gives every one.
+pub fn episodes_runtime(episodes: &[&EpisodeInfo]) -> Option<u32> {
+    episodes.iter().map(|episode| episode.runtime).sum()
+}
+
+/// Whether a file running `seconds` can hold `episodes`; true when either length is unknown.
+pub fn episodes_fit(seconds: Option<f64>, episodes: &[&EpisodeInfo]) -> bool {
+    let (Some(seconds), Some(minutes)) = (seconds, episodes_runtime(episodes)) else {
+        return true;
+    };
+    let ratio = seconds / (f64::from(minutes) * 60.0);
+    (EPISODE_LENGTH_RATIO.recip()..=EPISODE_LENGTH_RATIO).contains(&ratio)
 }
 
 /// Sorts candidates by distance, preserving the source's own ranking among ties.
@@ -797,12 +819,55 @@ mod tests {
     }
 
     #[test]
+    fn only_grossly_different_lengths_rule_out_an_episode() {
+        let runs = |minutes| EpisodeInfo {
+            season: 5,
+            number: 1,
+            title: None,
+            air_date: None,
+            runtime: Some(minutes),
+        };
+        let (short, special) = (runs(10), runs(45));
+        assert!(
+            episodes_fit(Some(670.0), &[&short]),
+            "rounded runtimes pass"
+        );
+        assert!(episodes_fit(Some(1354.0), &[&runs(25)]));
+        assert!(
+            episodes_fit(Some(1320.0), &[&runs(30)]),
+            "nominal runtimes pass"
+        );
+        assert!(
+            !episodes_fit(Some(670.0), &[&special]),
+            "a short is not a special"
+        );
+        assert!(
+            !episodes_fit(Some(1354.0), &[&short]),
+            "a double is not a single"
+        );
+        assert!(episodes_fit(
+            Some(2710.0),
+            &[&runs(11), &runs(11), &runs(11), &runs(11)]
+        ));
+        assert!(episodes_fit(None, &[&special]));
+        let unknown = EpisodeInfo {
+            runtime: None,
+            ..short.clone()
+        };
+        assert!(
+            episodes_fit(Some(670.0), &[&special, &unknown]),
+            "a partial total proves nothing"
+        );
+    }
+
+    #[test]
     fn episode_counts_list_specials_separately() {
         let episode = |season| EpisodeInfo {
             season,
             number: 1,
             title: None,
             air_date: None,
+            runtime: None,
         };
         let count = |seasons: &[u32]| {
             let list: Vec<_> = seasons.iter().map(|&season| episode(season)).collect();
