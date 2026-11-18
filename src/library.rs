@@ -81,6 +81,30 @@ const COLUMNS: &str = "kind, path, original_path, title, year, source, source_id
     bit_depth, colour_space, colour_primaries, transfer, hdr, dv_profile, duration, size, mtime, \
     added, embedded_title, original_size, original_mtime";
 
+/// Rows that are the same film or episode as another item, with `same_work_params` as ?1–?10.
+const SAME_WORK: &str = "kind = ?1 AND title = ?2 AND year IS ?3 AND source_id IS ?4 \
+    AND edition IS ?5 AND part IS ?6 AND season IS ?7 AND episode IS ?8 AND air_date IS ?9 \
+    AND id IS NOT ?10";
+
+fn same_work_params(item: &Item) -> [&dyn rusqlite::ToSql; 10] {
+    let kind: &'static &'static str = match item.kind {
+        Kind::Movie => &"movie",
+        Kind::Episode => &"episode",
+    };
+    [
+        kind,
+        &item.title,
+        &item.year,
+        &item.source_id,
+        &item.edition,
+        &item.part,
+        &item.season,
+        &item.episode,
+        &item.air_date,
+        &item.id,
+    ]
+}
+
 pub struct Library {
     conn: Connection,
 }
@@ -358,9 +382,13 @@ impl Library {
             query.where_clause()
         );
         let mut statement = self.conn.prepare(&sql)?;
-        let mut items: Vec<Item> = statement
+        let items: Vec<Item> = statement
             .query_map(params_from_iter(query.params()), item_from_row)?
             .collect::<rusqlite::Result<_>>()?;
+        self.with_streams(items)
+    }
+
+    fn with_streams(&self, mut items: Vec<Item>) -> Result<Vec<Item>> {
         for item in &mut items {
             if let Some(id) = item.id {
                 item.media.audio = self.audio_streams(id)?;
@@ -368,6 +396,17 @@ impl Library {
             }
         }
         Ok(items)
+    }
+
+    /// The other library files that are the same film or episode as `item`, oldest first.
+    pub fn versions_of(&self, item: &Item) -> Result<Vec<Item>> {
+        let mut statement = self.conn.prepare_cached(&format!(
+            "SELECT * FROM items WHERE {SAME_WORK} ORDER BY added, path"
+        ))?;
+        let items = statement
+            .query_map(same_work_params(item), item_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        self.with_streams(items)
     }
 
     /// How many library files of `kind` were identified as `source`'s entry `id`.
@@ -391,26 +430,15 @@ impl Library {
     }
 
     fn same_work_exists(&self, item: &Item, same_file: bool) -> Result<bool> {
+        let size = item.size as i64;
+        let mut values = same_work_params(item).to_vec();
+        values.extend([&same_file as &dyn rusqlite::ToSql, &size, &item.media.resolution]);
         Ok(self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM items WHERE kind = ?1 AND title = ?2 AND year IS ?3 \
-             AND source_id IS ?4 AND edition IS ?5 AND part IS ?6 AND season IS ?7 \
-             AND episode IS ?8 AND air_date IS ?9 AND id IS NOT ?10 \
-             AND (NOT ?11 OR (size = ?12 AND resolution IS ?13)))",
-            params![
-                item.kind.as_str(),
-                item.title,
-                item.year,
-                item.source_id,
-                item.edition,
-                item.part,
-                item.season,
-                item.episode,
-                item.air_date,
-                item.id,
-                same_file,
-                item.size as i64,
-                item.media.resolution,
-            ],
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM items WHERE {SAME_WORK} \
+                 AND (NOT ?11 OR (size = ?12 AND resolution IS ?13)))"
+            ),
+            values.as_slice(),
             |row| row.get(0),
         )?)
     }

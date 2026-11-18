@@ -186,6 +186,15 @@ more for one import, such as `reel import -o remux --remux-arg=--anime Frieren/`
 With the Nix modules, set `import.videoconverter` to the package's binary, e.g.
 `"${pkgs.videoconverter}/bin/videoconverter"`.
 
+When a file is the same film or episode (and edition and part) as one already in the library
+but not a copy of it, an interactive import shows the files side by side: size, running time,
+overall bitrate, codec, resolution and bit depth, HDR and Dolby Vision, colour, audio and
+subtitle tracks, and title tag, with the rows on which they agree dimmed. Then you choose to
+keep both, replace the library's file (`r`, or `r2` and so on when it has several), or skip the
+new one. A replacement takes the library file's place only once it is complete, and the old
+file and its sidecars are then deleted. An exact copy (the same size and resolution) is skipped
+without asking, and `--quiet` keeps both.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
@@ -232,7 +241,7 @@ Handled along the way:
 
 - Plex `{tmdb-…}`/`{tvdb-…}` tags already present in names are used for a direct lookup.
 - Editions (`{edition-Director's Cut}`) and split films (`- pt1`).
-- Multiple versions of the same film or episode gain a resolution suffix (`- 1080p`). The copy
+- Multiple versions of the same film or episode, when you keep both, gain a resolution suffix (`- 1080p`). The copy
   already in the library is renamed the next time `reel move` runs. Copies that would share a
   name get a `copy 2`, `copy 3`, … suffix after the resolution.
 - Multi-episode files (`s02e01-e03`), specials (`Season 00`) and date-based shows.
@@ -276,6 +285,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `import` | Discovery, grouping, match decisions, and the per-file import step |
 | `naming` | Plex-convention paths, sidecar subtitle discovery |
 | `fileops`, `remux` | Placing files: copy, move, links, and remuxing with videoconverter |
+| `versions` | Comparing a new file with the library's versions and asking which to keep |
 | `probe` | ffprobe invocation and interpretation |
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, purge, stats |

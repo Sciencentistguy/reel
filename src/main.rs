@@ -20,6 +20,7 @@ mod query;
 mod remux;
 mod sync;
 mod unmatched;
+mod versions;
 
 use config::Config;
 use library::Library;

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -31,6 +31,16 @@ pub fn transfer(source: &Path, destination: &Path, operation: Operation) -> Resu
         )
         .to_lowercase()
     })
+}
+
+/// A hidden name beside `destination` to build it under, so that it only appears once complete.
+pub fn partial_path(destination: &Path) -> PathBuf {
+    let stem = destination.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match destination.extension() {
+        Some(extension) => format!(".{stem}.partial.{}", extension.to_string_lossy()),
+        None => format!(".{stem}.partial"),
+    };
+    destination.with_file_name(name)
 }
 
 fn move_file(source: &Path, destination: &Path) -> io::Result<()> {

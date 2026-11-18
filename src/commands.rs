@@ -9,12 +9,12 @@ use crate::config::{Config, Operation};
 use crate::fileops;
 use crate::import::{file_stamp, prompt};
 use crate::library::Library;
-use crate::model::{Item, Kind};
+use crate::model::{AudioStream, Item, Kind, SubtitleStream};
 use crate::naming;
 use crate::probe;
 use crate::query::Query;
 
-fn human_size(bytes: u64) -> String {
+pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -96,27 +96,11 @@ pub fn info(library: &Library, query: &Query) -> Result<()> {
             println!("  colour:    {colour}");
         }
         for (number, stream) in media.audio.iter().enumerate() {
-            let description = join(vec![
-                stream.language.clone(),
-                stream.codec.clone(),
-                stream.profile.clone(),
-                stream
-                    .layout
-                    .clone()
-                    .or(stream.channels.map(|c| format!("{c} channels"))),
-                stream.atmos.then(|| "Atmos".to_string()),
-                stream.title.as_ref().map(|title| format!("{title:?}")),
-            ]);
+            let description = describe_audio(stream);
             println!("  audio {:<4} {description}", format!("{}:", number + 1));
         }
         for (number, stream) in media.subtitles.iter().enumerate() {
-            let description = join(vec![
-                stream.language.clone(),
-                stream.codec.clone(),
-                stream.forced.then(|| "forced".to_string()),
-                stream.sdh.then(|| "SDH".to_string()),
-                stream.title.as_ref().map(|title| format!("{title:?}")),
-            ]);
+            let description = describe_subtitle(stream);
             println!("  subs {:<5} {description}", format!("{}:", number + 1));
         }
         for (sidecar, _) in naming::sidecars(&item.path) {
@@ -126,6 +110,36 @@ pub fn info(library: &Library, query: &Query) -> Result<()> {
         println!();
     }
     Ok(())
+}
+
+fn join_present(parts: Vec<Option<String>>) -> String {
+    parts.into_iter().flatten().collect::<Vec<_>>().join(", ")
+}
+
+/// An audio stream on one line, such as `eng, truehd, 7.1, Atmos`.
+pub fn describe_audio(stream: &AudioStream) -> String {
+    join_present(vec![
+        stream.language.clone(),
+        stream.codec.clone(),
+        stream.profile.clone(),
+        stream
+            .layout
+            .clone()
+            .or(stream.channels.map(|c| format!("{c} channels"))),
+        stream.atmos.then(|| "Atmos".to_string()),
+        stream.title.as_ref().map(|title| format!("{title:?}")),
+    ])
+}
+
+/// A subtitle stream on one line, such as `eng, hdmv_pgs_subtitle, forced`.
+pub fn describe_subtitle(stream: &SubtitleStream) -> String {
+    join_present(vec![
+        stream.language.clone(),
+        stream.codec.clone(),
+        stream.forced.then(|| "forced".to_string()),
+        stream.sdh.then(|| "SDH".to_string()),
+        stream.title.as_ref().map(|title| format!("{title:?}")),
+    ])
 }
 
 /// Renames files to match the current metadata and naming configuration.

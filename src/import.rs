@@ -1,6 +1,7 @@
 //! The import pipeline: discover files, identify them, then file them into the library.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,6 +22,7 @@ use crate::naming;
 use crate::parse::{self, Parsed};
 use crate::probe;
 use crate::remux;
+use crate::versions::{self, Choice, Resolve};
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "m4v", "avi", "mov", "wmv", "ts", "m2ts", "mpg", "mpeg", "webm", "flv", "ogv",
@@ -329,7 +331,7 @@ fn use_colour() -> bool {
 }
 
 /// `text` in the SGR style `code` (such as `"33"` for yellow), when output may be coloured.
-fn paint(code: &str, text: &str) -> String {
+pub fn paint(code: &str, text: &str) -> String {
     if use_colour() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
@@ -1032,12 +1034,25 @@ struct Importer<'a> {
     remux_args: Vec<String>,
     /// Remuxes waiting until every group has been decided, so prompts never wait on them.
     queued: Vec<QueuedRemux>,
+    /// Asks what to do with a new version of something already in the library. Without it,
+    /// both are kept.
+    resolve: Option<Resolve<'a>>,
 }
 
 struct QueuedRemux {
     item: Item,
     source: PathBuf,
     destination: PathBuf,
+    /// The library file this remux replaces once it has finished.
+    replaces: Option<Item>,
+}
+
+/// What became of one file.
+enum Outcome {
+    Imported,
+    Skipped,
+    /// The user stopped the import.
+    Aborted,
 }
 
 impl Importer<'_> {
@@ -1063,8 +1078,7 @@ impl Importer<'_> {
         None
     }
 
-    /// Returns whether the file was imported (as opposed to skipped).
-    fn import(&mut self, mut item: Item, file: &Pending, media: Option<MediaInfo>) -> Result<bool> {
+    fn import(&mut self, mut item: Item, file: &Pending, media: Option<MediaInfo>) -> Result<Outcome> {
         if let Some(media) = media {
             item.media = media;
         }
@@ -1086,33 +1100,51 @@ impl Importer<'_> {
                 "  warning: {} is already in the library; skipping",
                 file.path.display()
             );
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         }
 
-        let has_versions = self.library.has_other_versions(&item)?
-            || self.planned.iter().any(|planned| planned.same_work(&item));
+        let mut replacing = None;
+        let in_library = match self.resolve.filter(|_| !self.adopt) {
+            Some(resolve) => {
+                let mut existing = self.library.versions_of(&item)?;
+                if !existing.is_empty() {
+                    match resolve(&item, &file.path, &existing)? {
+                        Choice::KeepBoth => {}
+                        Choice::Skip => return Ok(Outcome::Skipped),
+                        Choice::Abort => return Ok(Outcome::Aborted),
+                        Choice::Replace(index) => replacing = Some(existing.remove(index)),
+                    }
+                }
+                !existing.is_empty()
+            }
+            None => self.library.has_other_versions(&item)?,
+        };
+        let has_versions =
+            in_library || self.planned.iter().any(|planned| planned.same_work(&item));
         let remuxing = self.operation == Operation::Remux && !self.adopt;
         if remuxing {
             item.path.set_extension("mkv");
         }
+        let replaced_path = replacing.as_ref().map(|old: &Item| old.path.clone());
         let claimed = &self.claimed;
+        // The file being replaced is going, so its name is free for the new one.
+        let taken = |path: &Path| {
+            claimed.contains(path)
+                || (path.symlink_metadata().is_ok() && Some(path) != replaced_path.as_deref())
+        };
         let destination = if self.adopt {
             file.path.clone()
         } else {
-            naming::free_destination(self.config, &item, has_versions, &file.path, |path| {
-                claimed.contains(path) || path.symlink_metadata().is_ok()
-            })
+            naming::free_destination(self.config, &item, has_versions, &file.path, taken)
         };
         let in_place = destination == file.path;
-        if !in_place
-            && (self.claimed.contains(&destination) || destination.symlink_metadata().is_ok())
-        {
+        if !in_place && taken(&destination) {
             eprintln!(
                 "  warning: {} already exists; skipping {}",
                 destination.display(),
                 file.path.display()
             );
-            return Ok(false);
+            return Ok(Outcome::Skipped);
         }
 
         let name = file.path.file_name().unwrap_or_default().to_string_lossy();
@@ -1123,11 +1155,14 @@ impl Importer<'_> {
         } else {
             println!("  {name}\n    -> {}", destination.display());
         }
+        if let Some(old) = &replacing {
+            println!("    replacing {}", old.path.display());
+        }
         self.versioned |= has_versions;
         self.claimed.insert(destination.clone());
         if self.pretend {
             self.planned.push(item);
-            return Ok(true);
+            return Ok(Outcome::Imported);
         }
         if remuxing && !in_place {
             self.planned.push(item.clone());
@@ -1135,8 +1170,9 @@ impl Importer<'_> {
                 item,
                 source: file.path.clone(),
                 destination,
+                replaces: replacing,
             });
-            return Ok(true);
+            return Ok(Outcome::Imported);
         }
 
         if !in_place {
@@ -1145,7 +1181,29 @@ impl Importer<'_> {
             } else {
                 Vec::new()
             };
-            fileops::transfer(&file.path, &destination, self.operation)?;
+            match &replacing {
+                // Complete beside the old file first, so a failure leaves the old one alone.
+                Some(_) => {
+                    let partial = fileops::partial_path(&destination);
+                    fileops::transfer(&file.path, &partial, self.operation)?;
+                    if let Err(err) = fs::rename(&partial, &destination) {
+                        // A moved source goes back where it was rather than being lost.
+                        if self.operation != Operation::Move
+                            || fs::rename(&partial, &file.path).is_err()
+                        {
+                            let _ = fs::remove_file(&partial);
+                        }
+                        return Err(err).with_context(|| {
+                            format!("cannot rename {} into place", partial.display())
+                        });
+                    }
+                }
+                None => fileops::transfer(&file.path, &destination, self.operation)?,
+            }
+            // Before the new sidecars arrive, as they may take the old ones' names.
+            if let Some(old) = &replacing {
+                self.retire(old, &destination)?;
+            }
             for (sidecar, suffix) in sidecars {
                 let target = naming::sidecar_destination(&destination, &suffix);
                 if let Err(err) = fileops::transfer(&sidecar, &target, self.operation) {
@@ -1158,9 +1216,35 @@ impl Importer<'_> {
                 fileops::prune_empty_dirs(parent, &file.root);
             }
         }
+        if in_place && let Some(old) = &replacing {
+            self.retire(old, &destination)?;
+        }
         let original = (!self.adopt).then(|| file.path.clone());
         self.record(item, original, destination)?;
-        Ok(true)
+        Ok(Outcome::Imported)
+    }
+
+    /// Removes `old` from the library and deletes its files, all but `kept`, which the new file
+    /// is about to take over.
+    fn retire(&mut self, old: &Item, kept: &Path) -> Result<()> {
+        let sidecars = naming::sidecars(&old.path).into_iter().map(|(path, _)| path);
+        let video = (old.path != kept).then(|| old.path.clone());
+        for path in sidecars.chain(video) {
+            if let Err(err) = fs::remove_file(&path)
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                eprintln!("  warning: cannot delete {}: {err}", path.display());
+            }
+        }
+        if old.path != kept
+            && let Some(parent) = old.path.parent()
+        {
+            fileops::prune_empty_dirs(parent, naming::library_root(self.config, old.kind));
+        }
+        if let Some(id) = old.id {
+            self.library.remove(id)?;
+        }
+        Ok(())
     }
 
     fn record(&mut self, mut item: Item, original: Option<PathBuf>, path: PathBuf) -> Result<()> {
@@ -1182,6 +1266,10 @@ impl Importer<'_> {
             .map(|job| remux::Job {
                 source: &job.source,
                 destination: &job.destination,
+                replace: job
+                    .replaces
+                    .as_ref()
+                    .is_some_and(|old| old.path == job.destination),
             })
             .collect();
         let outcomes = remux::remux(&self.config.import.videoconverter, &self.remux_args, &jobs);
@@ -1215,7 +1303,11 @@ impl Importer<'_> {
             mut item,
             source,
             destination,
+            replaces,
         } = job;
+        if let Some(old) = &replaces {
+            self.retire(old, &destination)?;
+        }
         if self.config.import.subtitles {
             for (sidecar, suffix) in naming::sidecars(&source) {
                 let target = naming::sidecar_destination(&destination, &suffix);
@@ -1280,7 +1372,9 @@ impl Sources for Online<'_> {
 
 pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<()> {
     let mut sources = Online::new(&config.metadata);
-    run_with(config, library, options, false, &mut sources)
+    let ask = |new: &Item, path: &Path, existing: &[Item]| versions::ask(new, path, existing, prompt);
+    let interactive = !options.quiet && io::stdin().is_terminal();
+    run_with(config, library, options, false, &mut sources, interactive.then_some(&ask))
 }
 
 /// Adds files that are in the library folders but missing from the database, leaving them where
@@ -1288,7 +1382,7 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
 pub fn rescan(config: &Config, library: &mut Library, rescan: Rescan) -> Result<()> {
     let options = rescan_options(config, rescan)?;
     let mut sources = Online::new(&config.metadata);
-    run_with(config, library, &options, true, &mut sources)
+    run_with(config, library, &options, true, &mut sources, None)
 }
 
 /// Import options that look in the library's own folders unless `rescan` names others.
@@ -1328,6 +1422,7 @@ fn run_with(
     options: &Options,
     adopt: bool,
     sources: &mut dyn Sources,
+    resolve: Option<Resolve>,
 ) -> Result<()> {
     let mut pending = Vec::new();
     let mut known = 0;
@@ -1388,6 +1483,7 @@ fn run_with(
         summary: Summary::default(),
         remux_args: [&config.import.remux_args[..], &options.remux_args[..]].concat(),
         queued: Vec::new(),
+        resolve,
     };
 
     let mut aborted = false;
@@ -1480,8 +1576,12 @@ fn run_with(
                 }
             }
             match importer.import(item, file, media) {
-                Ok(true) => importer.summary.imported += 1,
-                Ok(false) => importer.summary.skipped += 1,
+                Ok(Outcome::Imported) => importer.summary.imported += 1,
+                Ok(Outcome::Skipped) => importer.summary.skipped += 1,
+                Ok(Outcome::Aborted) => {
+                    aborted = true;
+                    break 'groups;
+                }
                 Err(err) => {
                     eprintln!("  error: {err:#}");
                     importer.summary.skipped += 1;
@@ -2406,6 +2506,25 @@ mod tests {
             self.dir.path().join(relative)
         }
 
+        /// Imports, answering any question about versions with `choice`, and returns how many
+        /// library files each question showed.
+        fn import_choosing(&mut self, options: &Options, choice: Choice) -> Result<Vec<usize>> {
+            let shown = std::cell::RefCell::new(Vec::new());
+            let resolve = |_: &Item, _: &Path, existing: &[Item]| {
+                shown.borrow_mut().push(existing.len());
+                Ok(choice)
+            };
+            run_with(
+                &self.config,
+                &mut self.library,
+                options,
+                false,
+                &mut self.sources,
+                Some(&resolve),
+            )?;
+            Ok(shown.into_inner())
+        }
+
         fn import(&mut self, options: &Options) -> Result<()> {
             run_with(
                 &self.config,
@@ -2413,6 +2532,7 @@ mod tests {
                 options,
                 false,
                 &mut self.sources,
+                None,
             )
         }
 
@@ -2432,6 +2552,7 @@ mod tests {
                 &options,
                 true,
                 &mut self.sources,
+                None,
             )
         }
 
@@ -2586,6 +2707,108 @@ mod tests {
 
         assert!(env.rows().is_empty());
         assert!(!env.path("Movies/Heat (1995) {tmdb-1}").exists());
+    }
+
+    /// Imports a 1080p Heat with a sidecar, then offers a 2160p one, answering with `choice`.
+    fn offer_a_second_heat(env: &mut Env, choice: Choice) -> Vec<usize> {
+        env.write("old/Heat.1995.1080p.mkv", "old video");
+        env.write("old/Heat.1995.1080p.en.srt", "old subs");
+        env.import(&options(env, &["old"])).unwrap();
+        env.write("new/Heat.1995.2160p.mkv", "new, bigger video");
+        env.import_choosing(&options(env, &["new"]), choice).unwrap()
+    }
+
+    const HEAT: &str = "Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv";
+
+    #[test]
+    fn a_new_version_can_replace_the_old_one() {
+        let mut env = Env::new();
+        assert_eq!(offer_a_second_heat(&mut env, Choice::Replace(0)), [1]);
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, env.path(HEAT), "no version suffix is needed any more");
+        assert_eq!(rows[0].media.resolution.as_deref(), Some("2160p"));
+        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "new, bigger video");
+        let folder = env.path(HEAT).parent().unwrap().to_owned();
+        let left: Vec<_> = std::fs::read_dir(&folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("Heat (1995) {tmdb-1}.mkv")], "the old sidecar goes too");
+    }
+
+    #[test]
+    fn a_replacement_brings_its_own_sidecars() {
+        let mut env = Env::new();
+        env.write("new/Heat.1995.2160p.en.srt", "new subs");
+        offer_a_second_heat(&mut env, Choice::Replace(0));
+        let sidecar = env.path(HEAT).with_extension("en.srt");
+        assert_eq!(std::fs::read_to_string(sidecar).unwrap(), "new subs");
+    }
+
+    #[test]
+    fn keeping_both_imports_another_version() {
+        let mut env = Env::new();
+        offer_a_second_heat(&mut env, Choice::KeepBoth);
+        assert_eq!(env.rows().len(), 2);
+        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "old video");
+    }
+
+    #[test]
+    fn skipping_leaves_the_library_alone() {
+        let mut env = Env::new();
+        offer_a_second_heat(&mut env, Choice::Skip);
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].media.resolution.as_deref(), Some("1080p"));
+        assert!(env.path(HEAT).with_extension("en.srt").exists());
+    }
+
+    #[test]
+    fn stopping_at_the_question_imports_nothing_more() {
+        let mut env = Env::new();
+        env.write("new/Ronin.1998.mkv", "another film");
+        offer_a_second_heat(&mut env, Choice::Abort);
+        assert_eq!(env.rows().len(), 1);
+    }
+
+    #[test]
+    fn exact_copies_are_skipped_without_asking() {
+        let mut env = Env::new();
+        env.write("old/Heat.1995.1080p.mkv", "video");
+        env.import(&options(&env, &["old"])).unwrap();
+        env.write("new/Heat.1995.1080p.mkv", "video");
+        let shown = env.import_choosing(&options(&env, &["new"]), Choice::KeepBoth).unwrap();
+        assert!(shown.is_empty());
+        assert_eq!(env.rows().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_remux_replaces_the_old_file_once_it_has_finished() {
+        let mut env = Env::new();
+        env.write("old/Heat.1995.1080p.mkv", "old video");
+        env.import(&options(&env, &["old"])).unwrap();
+        fake_videoconverter(&mut env, "echo remuxed > \"$out\"");
+        env.write("new/Heat.1995.2160p.mp4", "new video");
+        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0)).unwrap();
+        let rows = env.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, env.path(HEAT));
+        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "remuxed\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_remux_keeps_the_file_it_would_have_replaced() {
+        let mut env = Env::new();
+        env.write("old/Heat.1995.1080p.mkv", "old video");
+        env.import(&options(&env, &["old"])).unwrap();
+        fake_videoconverter(&mut env, "exit 1");
+        env.write("new/Heat.1995.2160p.mp4", "new video");
+        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0)).unwrap();
+        assert_eq!(env.rows().len(), 1);
+        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "old video");
     }
 
     #[test]

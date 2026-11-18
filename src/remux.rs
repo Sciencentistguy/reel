@@ -2,10 +2,12 @@
 
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+
+use crate::fileops::partial_path;
 
 /// Returned when the user pressed Ctrl-C during a remux.
 #[derive(Debug)]
@@ -23,15 +25,17 @@ impl std::error::Error for Interrupted {}
 pub struct Job<'a> {
     pub source: &'a Path,
     pub destination: &'a Path,
+    /// Whether the file at `destination` is being replaced, and so may be overwritten.
+    pub replace: bool,
 }
 
 /// Remuxes every job in one videoconverter run, which converts them in parallel, never
-/// overwriting an existing file. Each output is written beside its destination under a hidden
+/// overwriting an existing file unless the job replaces it. Each output is written beside its destination under a hidden
 /// name and renamed into place only once its conversion has finished, so a failed or interrupted
 /// remux leaves nothing in the library. Returns each job's outcome in order; jobs that Ctrl-C cut
 /// short fail with `Interrupted`.
 pub fn remux(program: &str, args: &[String], jobs: &[Job]) -> Vec<Result<()>> {
-    let mut outcomes: Vec<Result<()>> = jobs.iter().map(|job| prepare(job.destination)).collect();
+    let mut outcomes: Vec<Result<()>> = jobs.iter().map(prepare).collect();
     let ready: Vec<&Job> = jobs
         .iter()
         .zip(&outcomes)
@@ -50,8 +54,9 @@ pub fn remux(program: &str, args: &[String], jobs: &[Job]) -> Vec<Result<()>> {
     outcomes
 }
 
-fn prepare(destination: &Path) -> Result<()> {
-    if destination.symlink_metadata().is_ok() {
+fn prepare(job: &Job) -> Result<()> {
+    let destination = job.destination;
+    if !job.replace && destination.symlink_metadata().is_ok() {
         bail!("destination already exists: {}", destination.display());
     }
     let parent = destination
@@ -134,11 +139,6 @@ fn run(program: &str, args: &[String], jobs: &[&Job]) -> Result<ExitStatus> {
         .with_context(|| format!("cannot wait for {program}"))
 }
 
-fn partial_path(destination: &Path) -> PathBuf {
-    let stem = destination.file_stem().unwrap_or_default().to_string_lossy();
-    destination.with_file_name(format!(".{stem}.partial.mkv"))
-}
-
 fn interrupted(status: ExitStatus) -> bool {
     #[cfg(unix)]
     {
@@ -197,6 +197,7 @@ pub fn write_script(path: &Path, script: &str) {
 
 #[cfg(all(test, unix))]
 mod tests {
+
     use super::*;
 
     /// A stand-in for videoconverter that logs its arguments to `<program>.args`, then runs
@@ -227,6 +228,7 @@ mod tests {
         let job = Job {
             source: Path::new("source.mp4"),
             destination,
+            replace: false,
         };
         remux(program, args, &[job]).pop().unwrap()
     }
@@ -286,6 +288,7 @@ mod tests {
             Job {
                 source: Path::new(source),
                 destination,
+                replace: false,
             }
         });
         let outcomes = remux(&program, &[], &jobs);
@@ -319,6 +322,7 @@ mod tests {
         let jobs = [("a.mp4", &a), ("b.mp4", &b)].map(|(source, destination)| Job {
             source: Path::new(source),
             destination,
+            replace: false,
         });
         let outcomes = remux(&program, &[], &jobs);
         assert!(outcomes[0].is_ok() && a.exists());
@@ -334,6 +338,21 @@ mod tests {
         assert!(one(&program, &[], &destination).is_err());
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
         assert!(!Path::new(&format!("{program}.args")).exists(), "nothing left to run");
+    }
+
+    #[test]
+    fn a_replacing_remux_overwrites_its_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake(dir.path(), "echo remuxed > \"$out\"");
+        let destination = dir.path().join("Film.mkv");
+        fs::write(&destination, "original").unwrap();
+        let job = Job {
+            source: Path::new("source.mp4"),
+            destination: &destination,
+            replace: true,
+        };
+        remux(&program, &[], &[job]).pop().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "remuxed\n");
     }
 
     #[test]
