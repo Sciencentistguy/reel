@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::config::Operation;
 
 /// Places `source` at `destination` using `operation`, never overwriting an existing file.
+/// `Remux` copies: remuxing a video is `remux::remux`'s job, and its sidecars are copied.
 pub fn transfer(source: &Path, destination: &Path, operation: Operation) -> Result<()> {
     if destination.symlink_metadata().is_ok() {
         bail!("destination already exists: {}", destination.display());
@@ -16,7 +17,7 @@ pub fn transfer(source: &Path, destination: &Path, operation: Operation) -> Resu
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     let result = match operation {
-        Operation::Copy => fs::copy(source, destination).map(drop),
+        Operation::Copy | Operation::Remux => fs::copy(source, destination).map(drop),
         Operation::Move => move_file(source, destination),
         Operation::Hardlink => fs::hard_link(source, destination),
         Operation::Symlink => symlink(source, destination),

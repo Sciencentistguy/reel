@@ -17,6 +17,7 @@ mod naming;
 mod parse;
 mod probe;
 mod query;
+mod remux;
 mod sync;
 mod unmatched;
 

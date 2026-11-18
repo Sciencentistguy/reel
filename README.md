@@ -33,11 +33,13 @@ movies = "~/Videos/Movies"
 tv = "~/Videos/TV Shows"
 
 [import]
-operation = "copy"      # copy | move | hardlink | symlink | reflink
+operation = "copy"      # copy | move | hardlink | symlink | reflink | remux
 subtitles = true        # bring sidecar subtitles along
 probe = true            # record media information with ffprobe
 strong_match = 0.08     # matches at or below this distance are applied unprompted
 timid = false           # always ask, even about certain matches
+videoconverter = "videoconverter"  # program used by the remux operation
+remux_args = []         # extra videoconverter arguments, e.g. ["--anime"]
 
 [naming]
 id_tags = true          # {tmdb-123} / {tvdb-123} folder tags
@@ -49,6 +51,9 @@ tvdb_api_key = ""       # v4 key; or set TVDB_API_KEY
 tmdb_language = "en-US"
 tvdb_language = "eng"
 ```
+
+The `remux` operation needs a [videoconverter](https://github.com/Sciencentistguy/videoconverter)
+recent enough to have `--output` and `--no-external-subs`; see [Remuxing](#remuxing).
 
 Films are always matched against TMDB. Shows are matched against TVDB by default, or TMDB with
 `tv_source = "tmdb"`. `ffprobe` (from ffmpeg) must be on `PATH` for media information.
@@ -155,6 +160,26 @@ A file the library records as an item's original path is skipped as already impo
 when the library's copy has since changed, so importing a download folder again only picks up
 new files.
 
+#### Remuxing
+
+`operation = "remux"` (or `--operation remux`) files each video as Matroska produced by
+[videoconverter](https://github.com/Sciencentistguy/videoconverter), which keeps the first video
+stream and the audio and subtitle streams in the languages it is told to keep, and turns raw PCM
+audio into FLAC. reel always passes `--copy-video`, so video is never re-encoded. The source is
+left where it is, as with `copy`, and sidecar subtitles are copied beside the new file rather than
+muxed in.
+
+Remuxes are queued and run one after another once every group has been decided, so no prompt
+waits on one. Each is written under a hidden `.….partial.mkv` name and renamed into place when it
+succeeds, and only then recorded in the database, with media information probed from the new file.
+A failed remux is reported and skipped; Ctrl-C stops the current one and leaves the rest
+unimported, as does Ctrl-C at a prompt beforehand.
+
+`remux_args` adds videoconverter arguments to every remux, and `--remux-arg` (repeatable) adds
+more for one import, such as `reel import -o remux --remux-arg=--anime Frieren/`.
+With the Nix modules, set `import.videoconverter` to the package's binary, e.g.
+`"${pkgs.videoconverter}/bin/videoconverter"`.
+
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
@@ -244,6 +269,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `metadata` | `MovieSource`/`ShowSource` traits, TMDB and TVDB clients, candidate scoring |
 | `import` | Discovery, grouping, match decisions, and the per-file import step |
 | `naming` | Plex-convention paths, sidecar subtitle discovery |
+| `fileops`, `remux` | Placing files: copy, move, links, and remuxing with videoconverter |
 | `probe` | ffprobe invocation and interpretation |
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, purge, stats |
@@ -255,5 +281,4 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 ## Potential future work
 
 - Fetching sidecar subtitles from OpenSubtitles.
-- Integration with [videoconverter](https://github.com/Sciencentistguy/videoconverter).
 - Plex local extras (trailers, featurettes) rather than ignoring them.

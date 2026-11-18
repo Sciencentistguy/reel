@@ -28,6 +28,8 @@ pub enum Operation {
     Hardlink,
     Symlink,
     Reflink,
+    /// Remux video files into Matroska with videoconverter, leaving the source in place.
+    Remux,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +44,10 @@ pub struct ImportConfig {
     pub strong_match: f64,
     /// Always ask which match to use, even when one is certain.
     pub timid: bool,
+    /// The videoconverter program used by the `remux` operation.
+    pub videoconverter: String,
+    /// Extra videoconverter arguments for the `remux` operation, such as `--anime`.
+    pub remux_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +107,8 @@ impl Default for ImportConfig {
             probe: true,
             strong_match: 0.08,
             timid: false,
+            videoconverter: "videoconverter".into(),
+            remux_args: Vec::new(),
         }
     }
 }
@@ -301,6 +309,7 @@ mod tests {
             ("hardlink", Operation::Hardlink),
             ("symlink", Operation::Symlink),
             ("reflink", Operation::Reflink),
+            ("remux", Operation::Remux),
         ] {
             let (_dir, config) = load(&format!("[import]\noperation = \"{name}\"\n"));
             assert_eq!(config.import.operation, operation);

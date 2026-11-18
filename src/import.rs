@@ -20,6 +20,7 @@ use crate::model::{Item, Kind, MediaInfo};
 use crate::naming;
 use crate::parse::{self, Parsed};
 use crate::probe;
+use crate::remux;
 
 pub const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "m4v", "avi", "mov", "wmv", "ts", "m2ts", "mpg", "mpeg", "webm", "flv", "ogv",
@@ -47,6 +48,10 @@ pub struct Options {
     /// How to place files in the library (overrides the configuration).
     #[arg(short, long, value_enum)]
     pub operation: Option<Operation>,
+    /// An extra videoconverter argument for the remux operation, after any configured ones
+    /// (`--remux-arg=--anime`). Repeatable.
+    #[arg(long = "remux-arg", value_name = "ARG", allow_hyphen_values = true)]
+    pub remux_args: Vec<String>,
     /// Never prompt; skip anything without a confident match.
     #[arg(short, long)]
     pub quiet: bool,
@@ -1023,6 +1028,16 @@ struct Importer<'a> {
     claimed: HashSet<PathBuf>,
     versioned: bool,
     summary: Summary,
+    /// videoconverter arguments for the remux operation.
+    remux_args: Vec<String>,
+    /// Remuxes waiting until every group has been decided, so prompts never wait on them.
+    queued: Vec<QueuedRemux>,
+}
+
+struct QueuedRemux {
+    item: Item,
+    source: PathBuf,
+    destination: PathBuf,
 }
 
 impl Importer<'_> {
@@ -1073,6 +1088,10 @@ impl Importer<'_> {
 
         let has_versions = self.library.has_other_versions(&item)?
             || self.planned.iter().any(|planned| planned.same_work(&item));
+        let remuxing = self.operation == Operation::Remux && !self.adopt;
+        if remuxing {
+            item.path.set_extension("mkv");
+        }
         let claimed = &self.claimed;
         let destination = if self.adopt {
             file.path.clone()
@@ -1107,6 +1126,15 @@ impl Importer<'_> {
             self.planned.push(item);
             return Ok(true);
         }
+        if remuxing && !in_place {
+            self.planned.push(item.clone());
+            self.queued.push(QueuedRemux {
+                item,
+                source: file.path.clone(),
+                destination,
+            });
+            return Ok(true);
+        }
 
         if !in_place {
             let sidecars = if self.config.import.subtitles {
@@ -1127,11 +1155,81 @@ impl Importer<'_> {
                 fileops::prune_empty_dirs(parent, &file.root);
             }
         }
-        item.original_path = (!self.adopt).then(|| file.path.clone());
-        item.path = destination;
-        item.added = now();
-        self.library.save(&mut item)?;
+        let original = (!self.adopt).then(|| file.path.clone());
+        self.record(item, original, destination)?;
         Ok(true)
+    }
+
+    fn record(&mut self, mut item: Item, original: Option<PathBuf>, path: PathBuf) -> Result<()> {
+        item.original_path = original;
+        item.path = path;
+        item.added = now();
+        self.library.save(&mut item)
+    }
+
+    /// Runs the queued remuxes in turn, stopping at Ctrl-C.
+    fn remux_queued(&mut self) {
+        let queued = std::mem::take(&mut self.queued);
+        let total = queued.len();
+        for (index, job) in queued.into_iter().enumerate() {
+            println!(
+                "\nRemuxing ({}/{total}) {}",
+                index + 1,
+                job.source.display()
+            );
+            let Err(err) = self.remux(job) else { continue };
+            if err.is::<remux::Interrupted>() {
+                let left = total - index;
+                self.summary.imported -= left;
+                self.summary.skipped += left;
+                println!("Interrupted; {left} file(s) left unimported.");
+                return;
+            }
+            eprintln!("  error: {err:#}");
+            self.summary.imported -= 1;
+            self.summary.skipped += 1;
+        }
+    }
+
+    fn remux(&mut self, job: QueuedRemux) -> Result<()> {
+        let QueuedRemux {
+            mut item,
+            source,
+            destination,
+        } = job;
+        let config = &self.config.import;
+        if let Err(err) = remux::remux(
+            &config.videoconverter,
+            &self.remux_args,
+            &source,
+            &destination,
+        ) {
+            if let Some(parent) = destination.parent() {
+                fileops::prune_empty_dirs(parent, naming::library_root(self.config, item.kind));
+            }
+            return Err(err);
+        }
+        if config.subtitles {
+            for (sidecar, suffix) in naming::sidecars(&source) {
+                let target = naming::sidecar_destination(&destination, &suffix);
+                if let Err(err) = fileops::transfer(&sidecar, &target, Operation::Copy) {
+                    eprintln!("  warning: {err:#}");
+                }
+            }
+        }
+        // The remux drops streams, so the library describes the new file, not the source.
+        if self.probe {
+            match probe::probe(&destination) {
+                Ok(media) => {
+                    let resolution = item.media.resolution.take();
+                    item.media = media;
+                    item.media.resolution = item.media.resolution.take().or(resolution);
+                }
+                Err(err) => eprintln!("  warning: {err:#}"),
+            }
+        }
+        (item.size, item.mtime) = file_stamp(&destination)?;
+        self.record(item, Some(source), destination)
     }
 }
 
@@ -1208,6 +1306,7 @@ fn rescan_options(config: &Config, rescan: Rescan) -> Result<Options> {
     Ok(Options {
         paths,
         operation: None,
+        remux_args: Vec::new(),
         quiet: rescan.quiet,
         pretend: rescan.pretend,
         kind: None,
@@ -1227,7 +1326,7 @@ fn run_with(
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
-        // A copied file can change while its source stays, so the source is recognised by name.
+        // A remuxed or copied file differs from its source, so the source is recognised by name.
         if library.contains_path(&path)? || (!adopt && library.imported_from(&path)?) {
             known += 1;
             continue;
@@ -1273,8 +1372,11 @@ fn run_with(
         claimed: HashSet::new(),
         versioned: false,
         summary: Summary::default(),
+        remux_args: [&config.import.remux_args[..], &options.remux_args[..]].concat(),
+        queued: Vec::new(),
     };
 
+    let mut aborted = false;
     let mut can_measure = config.import.probe;
     'groups: for mut group in group(pending) {
         let label = match group.kind {
@@ -1316,7 +1418,10 @@ fn run_with(
                 importer.summary.skipped += group.files.len();
                 continue;
             }
-            Decision::Abort => break,
+            Decision::Abort => {
+                aborted = true;
+                break;
+            }
         };
 
         let episodes = match lookup {
@@ -1353,7 +1458,10 @@ fn run_with(
                             importer.summary.skipped += 1;
                             continue;
                         }
-                        Placement::Aborted => break 'groups,
+                        Placement::Aborted => {
+                            aborted = true;
+                            break 'groups;
+                        }
                     }
                 }
             }
@@ -1366,6 +1474,15 @@ fn run_with(
                 }
             }
         }
+    }
+
+    if aborted && !importer.queued.is_empty() {
+        let left = importer.queued.len();
+        importer.summary.imported -= left;
+        importer.summary.skipped += left;
+        println!("Stopped before remuxing {left} file(s).");
+    } else {
+        importer.remux_queued();
     }
 
     let Summary { imported, skipped } = importer.summary;
@@ -2319,6 +2436,7 @@ mod tests {
         Options {
             paths: paths.iter().map(|path| env.path(path)).collect(),
             operation: None,
+            remux_args: Vec::new(),
             quiet: true,
             pretend: false,
             kind: None,
@@ -2393,6 +2511,50 @@ mod tests {
             "the directory given on the command line stays"
         );
         assert!(env.rows()[0].path.exists());
+    }
+
+    /// Points the configuration at a stand-in videoconverter that runs `body` with the output
+    /// path in `$out`.
+    #[cfg(unix)]
+    fn fake_videoconverter(env: &mut Env, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let program = env.write(
+            "videoconverter",
+            &format!("#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\nout=$2\n{body}\n"),
+        );
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.config.import.videoconverter = program.to_string_lossy().into_owned();
+        env.config.import.operation = Operation::Remux;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remuxing_writes_matroska_and_leaves_the_source() {
+        let mut env = Env::new();
+        fake_videoconverter(&mut env, "echo remuxed > \"$out\"");
+        let source = env.write("in/Heat.1995.mp4", "video");
+        env.write("in/Heat.1995.en.srt", "subs");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        let destination = env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv");
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "remuxed\n");
+        assert!(destination.with_extension("en.srt").exists());
+        assert!(source.exists(), "remuxing leaves the source");
+        let rows = env.rows();
+        assert_eq!(rows[0].path, destination);
+        assert_eq!(rows[0].size, 8, "the stamp is the remuxed file's");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_remux_imports_nothing() {
+        let mut env = Env::new();
+        fake_videoconverter(&mut env, "exit 1");
+        env.write("in/Heat.1995.mkv", "video");
+        env.import(&options(&env, &["in"])).unwrap();
+
+        assert!(env.rows().is_empty());
+        assert!(!env.path("Movies/Heat (1995) {tmdb-1}").exists());
     }
 
     #[test]
