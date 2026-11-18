@@ -72,6 +72,8 @@ pub struct MediaInfo {
     /// Dolby Vision profile: `5`, `8.1`, `7 FEL`, `7 MEL`, ...
     pub dv_profile: Option<String>,
     pub duration: Option<f64>,
+    /// The container's own title tag, which often names the episode a file holds.
+    pub title: Option<String>,
     pub audio: Vec<AudioStream>,
     pub subtitles: Vec<SubtitleStream>,
 }
@@ -156,6 +158,7 @@ impl Item {
         "hdr",
         "dv_profile",
         "duration",
+        "embedded_title",
         "audio_codec",
         "audio_profile",
         "audio_channels",
@@ -218,6 +221,7 @@ impl Item {
                 .duration
                 .map(|d| format!("{d:.0}"))
                 .unwrap_or_default(),
+            "embedded_title" => opt(&media.title),
             "audio_codec" => audio(|a| opt(&a.codec)),
             "audio_profile" => audio(|a| opt(&a.profile)),
             "audio_channels" => audio(|a| opt(&a.channels)),

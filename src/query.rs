@@ -63,6 +63,7 @@ fn field(name: &str) -> Option<Field> {
         "height" => item("height", Number),
         "bit_depth" => item("bit_depth", Number),
         "duration" => item("duration", Number),
+        "embedded_title" => item("embedded_title", Text),
         "size" => item("size", Number),
         "audio_codec" => audio("codec", Text),
         "audio_profile" => audio("profile", Text),

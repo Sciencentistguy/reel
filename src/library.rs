@@ -10,7 +10,8 @@ use crate::query::Query;
 
 /// Schema migrations, applied in order. Entry `n` upgrades a database from version `n` to `n + 1`,
 /// so the schema version is the length of this list. Never edit an entry once released; append.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE IF NOT EXISTS items (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -65,12 +66,16 @@ CREATE TABLE IF NOT EXISTS subtitle_streams (
     sdh INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (item_id, idx)
 );
-"];
+",
+    "
+ALTER TABLE items ADD COLUMN embedded_title TEXT;
+",
+];
 
 const COLUMNS: &str = "kind, path, original_path, title, year, source, source_id, edition, part, season, episode, \
     episode_end, episode_title, air_date, date_based, width, height, resolution, video_codec, \
     bit_depth, colour_space, colour_primaries, transfer, hdr, dv_profile, duration, size, mtime, \
-    added";
+    added, embedded_title";
 
 pub struct Library {
     conn: Connection,
@@ -114,6 +119,7 @@ fn item_from_row(row: &Row) -> rusqlite::Result<Item> {
             hdr: row.get("hdr")?,
             dv_profile: row.get("dv_profile")?,
             duration: row.get("duration")?,
+            title: row.get("embedded_title")?,
             audio: Vec::new(),
             subtitles: Vec::new(),
         },
@@ -215,14 +221,15 @@ impl Library {
             item.size as i64,
             item.mtime,
             item.added,
+            media.title,
             item.id,
         ];
-        let placeholders: Vec<String> = (1..=29).map(|n| format!("?{n}")).collect();
+        let placeholders: Vec<String> = (1..=30).map(|n| format!("?{n}")).collect();
         match item.id {
             None => {
                 tx.execute(
                     &format!(
-                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?30)",
+                        "INSERT INTO items ({COLUMNS}, id) VALUES ({}, ?31)",
                         placeholders.join(", ")
                     ),
                     values,
@@ -232,7 +239,7 @@ impl Library {
             Some(_) => {
                 tx.execute(
                     &format!(
-                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?30",
+                        "UPDATE items SET ({COLUMNS}) = ({}) WHERE id = ?31",
                         placeholders.join(", ")
                     ),
                     values,

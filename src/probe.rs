@@ -65,6 +65,8 @@ struct Disposition {
 #[derive(Deserialize)]
 struct Format {
     duration: Option<String>,
+    #[serde(default)]
+    tags: Tags,
 }
 
 #[derive(Deserialize)]
@@ -288,6 +290,12 @@ fn parse_streams(json: &[u8]) -> Result<MediaInfo> {
             .as_ref()
             .and_then(|f| f.duration.as_deref())
             .and_then(|d| d.parse().ok()),
+        title: output
+            .format
+            .as_ref()
+            .and_then(|f| f.tags.title.clone())
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty()),
         audio: of_type("audio").map(audio_stream).collect(),
         subtitles: of_type("subtitle").map(subtitle_stream).collect(),
         ..MediaInfo::default()
@@ -409,7 +417,7 @@ mod tests {
             {"codec_type": "subtitle", "codec_name": "subrip",
              "tags": {"language": "fre", "title": "French (SDH)"}}
         ],
-        "format": {"duration": "7265.432000"}
+        "format": {"duration": "7265.432000", "tags": {"title": " Heat "}}
     }"#;
 
     fn frame(components: &str) -> Vec<u8> {
@@ -437,6 +445,7 @@ mod tests {
         assert_eq!(info.hdr.as_deref(), Some("DV/HDR10"));
         assert_eq!(info.dv_profile.as_deref(), Some("7"));
         assert_eq!(info.duration, Some(7265.432));
+        assert_eq!(info.title.as_deref(), Some("Heat"));
 
         assert_eq!(info.audio.len(), 2);
         let atmos = &info.audio[0];

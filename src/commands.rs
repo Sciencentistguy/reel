@@ -65,6 +65,9 @@ pub fn info(library: &Library, query: &Query) -> Result<()> {
         if let Some(duration) = media.duration {
             println!("  duration:  {}", human_duration(duration));
         }
+        if let Some(title) = &media.title {
+            println!("  title tag: {title}");
+        }
         let video = join(vec![
             media.video_codec.clone(),
             media
