@@ -169,8 +169,9 @@ audio into FLAC. reel always passes `--copy-video`, so video is never re-encoded
 left where it is, as with `copy`, and sidecar subtitles are copied beside the new file rather than
 muxed in.
 
-Remuxes are queued and run one after another once every group has been decided, so no prompt
-waits on one. Each is written under a hidden `.….partial.mkv` name and renamed into place when it
+Before asking anything, reel runs `videoconverter --version` and stops if the program is missing
+or older than 0.5. Remuxes are queued and run one after another once every group has been
+decided, so no prompt waits on one. Each is written under a hidden `.….partial.mkv` name and renamed into place when it
 succeeds, and only then recorded in the database, with media information probed from the new file.
 A failed remux is reported and skipped; Ctrl-C stops the current one and leaves the rest
 unimported, as does Ctrl-C at a prompt beforehand.

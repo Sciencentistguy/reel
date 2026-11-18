@@ -49,6 +49,36 @@ pub fn remux(program: &str, args: &[String], source: &Path, destination: &Path) 
     result
 }
 
+/// The oldest videoconverter with the options `remux` passes.
+const MINIMUM_VERSION: (u32, u32) = (0, 5);
+
+/// Fails unless `program` runs and is a videoconverter new enough for `remux`.
+pub fn check(program: &str) -> Result<()> {
+    let output = Command::new(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("cannot run {program}, which the remux operation needs"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or_default().trim();
+    let (major, minor) = MINIMUM_VERSION;
+    match parse_version(line) {
+        Some(version) if version >= MINIMUM_VERSION => Ok(()),
+        Some(_) => bail!(
+            "the remux operation needs videoconverter {major}.{minor} or later, but {program} is {line:?}"
+        ),
+        None => bail!("cannot tell which videoconverter {program} is from its version {line:?}"),
+    }
+}
+
+/// Reads `videoconverter 0.5.0` as `(0, 5)`.
+fn parse_version(line: &str) -> Option<(u32, u32)> {
+    let version = line.strip_prefix("videoconverter ")?;
+    let mut numbers = version.split('.').map(str::parse);
+    Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
+}
+
 fn run(program: &str, args: &[String], source: &Path, output: &Path) -> Result<ExitStatus> {
     let mut child = Command::new(program)
         .args(["--yes", "--copy-video", "--no-external-subs"])
@@ -134,6 +164,39 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    fn version_script(dir: &Path, output: &str) -> String {
+        let path = dir.join("videoconverter");
+        fs::write(&path, format!("#!/bin/sh\necho stty noise >&2\n{output}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn versions_from_0_5_pass_the_check() {
+        let dir = tempfile::tempdir().unwrap();
+        for version in ["0.5.0", "0.12.1", "1.0.0"] {
+            let program = version_script(dir.path(), &format!("echo videoconverter {version}"));
+            check(&program).unwrap();
+        }
+    }
+
+    #[test]
+    fn older_versions_fail_the_check_naming_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = version_script(dir.path(), "echo videoconverter 0.4.0");
+        let err = format!("{:#}", check(&program).unwrap_err());
+        assert!(err.contains("0.5 or later") && err.contains("0.4.0"), "{err}");
+    }
+
+    #[test]
+    fn other_programs_and_missing_ones_fail_the_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = version_script(dir.path(), "echo ffmpeg version 8.0");
+        assert!(check(&program).is_err());
+        let missing = dir.path().join("missing").to_string_lossy().into_owned();
+        assert!(check(&missing).is_err());
     }
 
     #[test]

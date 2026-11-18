@@ -1360,11 +1360,17 @@ fn run_with(
         return Ok(());
     }
 
+    let operation = options.operation.unwrap_or(config.import.operation);
+    // Found out before any prompt, rather than once per file after them all.
+    if operation == Operation::Remux && !adopt && !options.pretend {
+        remux::check(&config.import.videoconverter)?;
+    }
+
     let interactive = !options.quiet && io::stdin().is_terminal();
     let mut importer = Importer {
         config,
         library,
-        operation: options.operation.unwrap_or(config.import.operation),
+        operation,
         pretend: options.pretend,
         probe: config.import.probe,
         adopt,
@@ -2520,7 +2526,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let program = env.write(
             "videoconverter",
-            &format!("#!/bin/sh\nwhile [ \"$1\" != --output ]; do shift; done\nout=$2\n{body}\n"),
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && echo videoconverter 0.5.0 && exit\n\
+                 while [ \"$1\" != --output ]; do shift; done\nout=$2\n{body}\n"
+            ),
         );
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         env.config.import.videoconverter = program.to_string_lossy().into_owned();
@@ -2543,6 +2552,22 @@ mod tests {
         let rows = env.rows();
         assert_eq!(rows[0].path, destination);
         assert_eq!(rows[0].size, 8, "the stamp is the remuxed file's");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_old_videoconverter_stops_the_import_before_anything_happens() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = Env::new();
+        fake_videoconverter(&mut env, "touch \"$out\"");
+        let program = env.write("old", "#!/bin/sh\necho videoconverter 0.4.0\n");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.config.import.videoconverter = program.to_string_lossy().into_owned();
+        env.write("in/Heat.1995.mkv", "video");
+
+        let err = env.import(&options(&env, &["in"])).unwrap_err();
+        assert!(format!("{err:#}").contains("0.5 or later"));
+        assert!(env.rows().is_empty());
     }
 
     #[cfg(unix)]
