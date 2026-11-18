@@ -1,7 +1,9 @@
 //! Media information via `ffprobe`.
 
+use std::num::NonZero;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -117,6 +119,26 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
         }
     }
     Ok(info)
+}
+
+/// Probes several files at once, since each probe mostly waits on ffprobe starting up and on disk
+/// reads. Results are in the same order as `paths`.
+pub fn probe_all(paths: &[&Path]) -> Vec<Result<MediaInfo>> {
+    const MAX_WORKERS: usize = 8;
+    let workers = thread::available_parallelism()
+        .map_or(1, NonZero::get)
+        .min(MAX_WORKERS);
+    let chunk = paths.len().div_ceil(workers).max(1);
+    thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk)
+            .map(|chunk| scope.spawn(|| chunk.iter().map(|path| probe(path)).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("probe thread panicked"))
+            .collect()
+    })
 }
 
 fn side_data<'a>(list: &'a [Value], kind: &str) -> Option<&'a Value> {

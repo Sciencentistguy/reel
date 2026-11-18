@@ -14,7 +14,7 @@ use crate::config::{Config, Operation};
 use crate::fileops;
 use crate::library::Library;
 use crate::metadata::{self, Candidate, EpisodeInfo, Length, MovieSource, ShowSource};
-use crate::model::{Item, Kind};
+use crate::model::{Item, Kind, MediaInfo};
 use crate::naming;
 use crate::parse::{self, Parsed};
 use crate::probe;
@@ -745,19 +745,40 @@ struct Importer<'a> {
 }
 
 impl Importer<'_> {
+    /// Probes all of `files` in parallel, giving `None` for each file that cannot be probed.
+    fn probe(&mut self, files: &[Pending]) -> Vec<Option<MediaInfo>> {
+        if !self.probe {
+            return vec![None; files.len()];
+        }
+        let paths: Vec<&Path> = files.iter().map(|file| file.path.as_path()).collect();
+        let results = probe::probe_all(&paths);
+        let mut ffprobe_missing = false;
+        let media = results
+            .into_iter()
+            .map(|result| {
+                result
+                    .inspect_err(|err| {
+                        if err.downcast_ref::<io::Error>().is_some() {
+                            ffprobe_missing = true;
+                        } else {
+                            eprintln!("  warning: {err:#}");
+                        }
+                    })
+                    .ok()
+            })
+            .collect();
+        if ffprobe_missing {
+            eprintln!("  warning: cannot run ffprobe (is ffmpeg installed?)");
+            eprintln!("  warning: continuing without media information");
+            self.probe = false;
+        }
+        media
+    }
+
     /// Returns whether the file was imported (as opposed to skipped).
-    fn import(&mut self, mut item: Item, file: &Pending) -> Result<bool> {
-        if self.probe {
-            match probe::probe(&file.path) {
-                Ok(media) => item.media = media,
-                Err(err) => {
-                    eprintln!("  warning: {err:#}");
-                    if err.downcast_ref::<io::Error>().is_some() {
-                        eprintln!("  warning: continuing without media information");
-                        self.probe = false;
-                    }
-                }
-            }
+    fn import(&mut self, mut item: Item, file: &Pending, media: Option<MediaInfo>) -> Result<bool> {
+        if let Some(media) = media {
+            item.media = media;
         }
         if item.media.resolution.is_none() {
             item.media.resolution = file.parsed.resolution.clone();
@@ -993,7 +1014,8 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
             }
             _ => None,
         };
-        for file in &group.files {
+        let media = importer.probe(&group.files);
+        for (file, media) in group.files.iter().zip(media) {
             let mut item = base_item(&group, file, candidate.as_ref());
             match group.kind {
                 Kind::Movie => {
@@ -1009,7 +1031,7 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
                     }
                 }
             }
-            match importer.import(item, file) {
+            match importer.import(item, file, media) {
                 Ok(true) => importer.summary.imported += 1,
                 Ok(false) => importer.summary.skipped += 1,
                 Err(err) => {
