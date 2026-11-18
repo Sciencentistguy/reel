@@ -41,6 +41,9 @@ pub struct AudioStream {
     pub channels: Option<u32>,
     pub layout: Option<String>,
     pub atmos: bool,
+    /// The stream's index within its file, as ffprobe numbers it. Only known for files probed
+    /// during this run; the library doesn't keep it.
+    pub index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -51,6 +54,8 @@ pub struct SubtitleStream {
     pub forced: bool,
     /// Flagged as being for the deaf and hard of hearing.
     pub sdh: bool,
+    /// As for `AudioStream::index`.
+    pub index: Option<u32>,
 }
 
 /// Technical properties of a file's primary video stream and of its audio and embedded

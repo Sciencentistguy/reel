@@ -193,7 +193,9 @@ subtitle tracks, and title tag, with the rows on which they agree dimmed. Then y
 keep both, replace the library's file (`r`, or `r2` and so on when it has several), or skip the
 new one. A replacement takes the library file's place only once it is complete, and the old
 file and its sidecars are then deleted. An exact copy (the same size and resolution) is skipped
-without asking, and `--quiet` keeps both.
+without asking, and `--quiet` keeps both. With the `remux` operation, the new file's tracks are
+shown as remuxing will leave them, from `videoconverter --plan`, so you can decide before any
+remuxing; its size and bitrate are still the source's.
 
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and

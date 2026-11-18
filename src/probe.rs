@@ -24,6 +24,7 @@ struct Output {
 
 #[derive(Deserialize)]
 struct Stream {
+    index: Option<u32>,
     codec_type: Option<String>,
     codec_name: Option<String>,
     profile: Option<String>,
@@ -258,6 +259,7 @@ fn audio_stream(stream: &Stream) -> AudioStream {
         profile: none_if_unknown(stream.profile.clone()),
         channels: stream.channels,
         layout: none_if_unknown(stream.channel_layout.clone()),
+        index: stream.index,
     }
 }
 
@@ -274,6 +276,7 @@ fn subtitle_stream(stream: &Stream) -> SubtitleStream {
         title,
         language: none_if_unknown(stream.tags.language.clone()).filter(|l| l != "und"),
         codec: stream.codec_name.clone(),
+        index: stream.index,
     }
 }
 

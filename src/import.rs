@@ -1103,12 +1103,17 @@ impl Importer<'_> {
             return Ok(Outcome::Skipped);
         }
 
+        let remuxing = self.operation == Operation::Remux && !self.adopt;
         let mut replacing = None;
         let in_library = match self.resolve.filter(|_| !self.adopt) {
             Some(resolve) => {
                 let mut existing = self.library.versions_of(&item)?;
                 if !existing.is_empty() {
-                    match resolve(&item, &file.path, &existing)? {
+                    let shown = match remuxing {
+                        true => self.as_remuxed(&item, &file.path),
+                        false => item.clone(),
+                    };
+                    match resolve(&shown, &file.path, &existing, remuxing)? {
                         Choice::KeepBoth => {}
                         Choice::Skip => return Ok(Outcome::Skipped),
                         Choice::Abort => return Ok(Outcome::Aborted),
@@ -1121,7 +1126,6 @@ impl Importer<'_> {
         };
         let has_versions =
             in_library || self.planned.iter().any(|planned| planned.same_work(&item));
-        let remuxing = self.operation == Operation::Remux && !self.adopt;
         if remuxing {
             item.path.set_extension("mkv");
         }
@@ -1222,6 +1226,17 @@ impl Importer<'_> {
         let original = (!self.adopt).then(|| file.path.clone());
         self.record(item, original, destination)?;
         Ok(Outcome::Imported)
+    }
+
+    /// `item` with the tracks remuxing `source` would leave it, or as it is if videoconverter
+    /// cannot say.
+    fn as_remuxed(&self, item: &Item, source: &Path) -> Item {
+        let mut shown = item.clone();
+        match remux::plan(&self.config.import.videoconverter, &self.remux_args, source) {
+            Ok(plan) => shown.media = plan.apply(&item.media),
+            Err(err) => eprintln!("  warning: {err:#}; showing the source's tracks"),
+        }
+        shown
     }
 
     /// Removes `old` from the library and deletes its files, all but `kept`, which the new file
@@ -1372,7 +1387,9 @@ impl Sources for Online<'_> {
 
 pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<()> {
     let mut sources = Online::new(&config.metadata);
-    let ask = |new: &Item, path: &Path, existing: &[Item]| versions::ask(new, path, existing, prompt);
+    let ask = |new: &Item, path: &Path, existing: &[Item], remuxed: bool| {
+        versions::ask(new, path, existing, remuxed, prompt)
+    };
     let interactive = !options.quiet && io::stdin().is_terminal();
     run_with(config, library, options, false, &mut sources, interactive.then_some(&ask))
 }
@@ -2509,9 +2526,18 @@ mod tests {
         /// Imports, answering any question about versions with `choice`, and returns how many
         /// library files each question showed.
         fn import_choosing(&mut self, options: &Options, choice: Choice) -> Result<Vec<usize>> {
+            Ok(self
+                .import_asked(options, choice)?
+                .into_iter()
+                .map(|(existing, _)| existing)
+                .collect())
+        }
+
+        /// As `import_choosing`, also returning whether each question showed a remux.
+        fn import_asked(&mut self, options: &Options, choice: Choice) -> Result<Vec<(usize, bool)>> {
             let shown = std::cell::RefCell::new(Vec::new());
-            let resolve = |_: &Item, _: &Path, existing: &[Item]| {
-                shown.borrow_mut().push(existing.len());
+            let resolve = |_: &Item, _: &Path, existing: &[Item], remuxed: bool| {
+                shown.borrow_mut().push((existing.len(), remuxed));
                 Ok(choice)
             };
             run_with(
@@ -2796,6 +2822,18 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, env.path(HEAT));
         assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "remuxed\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remux_imports_ask_about_the_remuxed_file() {
+        let mut env = Env::new();
+        env.write("old/Heat.1995.1080p.mkv", "old video");
+        env.import(&options(&env, &["old"])).unwrap();
+        fake_videoconverter(&mut env, "touch \"$out\"");
+        env.write("new/Heat.1995.2160p.mp4", "new video");
+        let asked = env.import_asked(&options(&env, &["new"]), Choice::Skip).unwrap();
+        assert_eq!(asked, [(1, true)]);
     }
 
     #[cfg(unix)]

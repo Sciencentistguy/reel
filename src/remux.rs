@@ -6,8 +6,10 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
 
 use crate::fileops::partial_path;
+use crate::model::MediaInfo;
 
 /// Returned when the user pressed Ctrl-C during a remux.
 #[derive(Debug)]
@@ -116,6 +118,92 @@ fn parse_version(line: &str) -> Option<(u32, u32)> {
     let version = line.strip_prefix("videoconverter ")?;
     let mut numbers = version.split('.').map(str::parse);
     Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
+}
+
+/// The tracks a remux of a file keeps, in their output order.
+#[derive(Debug, Deserialize)]
+pub struct Plan {
+    audio: Vec<Planned>,
+    subtitles: Vec<Planned>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Planned {
+    /// 0 for the video file itself; reel never asks for subtitle files to be muxed in.
+    file: usize,
+    index: u32,
+    codec: String,
+    copy: bool,
+}
+
+/// Asks videoconverter which tracks remuxing `source` with `args` would keep, without remuxing.
+pub fn plan(program: &str, args: &[String], source: &Path) -> Result<Plan> {
+    let output = Command::new(program)
+        .args(["--plan", "--copy-video", "--no-external-subs"])
+        .args(args)
+        .arg("--output")
+        .arg(std::env::temp_dir().join("reel-plan.mkv"))
+        .arg("--")
+        .arg(source)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("cannot run {program}"))?;
+    if !output.status.success() {
+        bail!("{program} cannot plan a remux of {}", source.display());
+    }
+    // Only the plan is JSON; any log lines around it are not.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .with_context(|| format!("{program} gave no plan for {}", source.display()))
+}
+
+impl Plan {
+    /// `media`, a probe of the source, as the remuxed file would have it: only the tracks
+    /// kept, in their new order, with the codecs of any that are re-encoded.
+    pub fn apply(&self, media: &MediaInfo) -> MediaInfo {
+        fn keep<T: Clone>(
+            planned: &[Planned],
+            streams: &[T],
+            index: impl Fn(&T) -> Option<u32>,
+            recode: impl Fn(&mut T, &str),
+        ) -> Vec<T> {
+            planned
+                .iter()
+                .filter(|planned| planned.file == 0)
+                .filter_map(|planned| {
+                    let mut stream = streams
+                        .iter()
+                        .find(|stream| index(stream) == Some(planned.index))?
+                        .clone();
+                    if !planned.copy {
+                        recode(&mut stream, &planned.codec);
+                    }
+                    Some(stream)
+                })
+                .collect()
+        }
+        MediaInfo {
+            audio: keep(
+                &self.audio,
+                &media.audio,
+                |stream| stream.index,
+                |stream, codec| {
+                    stream.codec = Some(codec.to_string());
+                    stream.profile = None;
+                    stream.atmos = false;
+                },
+            ),
+            subtitles: keep(
+                &self.subtitles,
+                &media.subtitles,
+                |stream| stream.index,
+                |stream, codec| stream.codec = Some(codec.to_string()),
+            ),
+            ..media.clone()
+        }
+    }
 }
 
 fn run(program: &str, args: &[String], jobs: &[&Job]) -> Result<ExitStatus> {
@@ -338,6 +426,78 @@ mod tests {
         assert!(one(&program, &[], &destination).is_err());
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
         assert!(!Path::new(&format!("{program}.args")).exists(), "nothing left to run");
+    }
+
+    #[test]
+    fn a_plan_is_read_from_among_videoconverter_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("videoconverter");
+        write_script(
+            &program,
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\necho 'WARN some log line'\n\
+             echo '{\"input\":\"in.mkv\",\"output\":\"x\",\"video\":[],\
+             \"audio\":[{\"file\":0,\"index\":2,\"codec\":\"flac\",\"copy\":true}],\"subtitles\":[]}'\n",
+        );
+        let program = program.to_string_lossy().into_owned();
+        let plan = plan(&program, &["--anime".into()], Path::new("in.mkv")).unwrap();
+        assert_eq!(plan.audio.len(), 1);
+        let args = fs::read_to_string(format!("{program}.args")).unwrap();
+        assert!(args.starts_with("--plan --copy-video --no-external-subs --anime --output "), "{args}");
+        assert!(args.ends_with(" -- in.mkv\n"), "{args}");
+    }
+
+    #[test]
+    fn a_failed_plan_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("videoconverter");
+        write_script(&program, "#!/bin/sh\nexit 1\n");
+        assert!(plan(&program.to_string_lossy(), &[], Path::new("in.mkv")).is_err());
+    }
+
+    #[test]
+    fn a_plan_keeps_reorders_and_recodes_tracks() {
+        use crate::model::{AudioStream, SubtitleStream};
+        let audio = |index, language: &str, codec: &str| AudioStream {
+            index: Some(index),
+            language: Some(language.into()),
+            codec: Some(codec.into()),
+            profile: Some("profile".into()),
+            ..AudioStream::default()
+        };
+        let media = MediaInfo {
+            audio: vec![audio(1, "eng", "flac"), audio(2, "jpn", "flac"), audio(3, "eng", "pcm_s24le")],
+            subtitles: vec![SubtitleStream {
+                index: Some(4),
+                ..SubtitleStream::default()
+            }],
+            video_codec: Some("hevc".into()),
+            ..MediaInfo::default()
+        };
+        let planned = |index, codec: &str, copy| Planned {
+            file: 0,
+            index,
+            codec: codec.into(),
+            copy,
+        };
+        let plan = Plan {
+            audio: vec![planned(2, "flac", true), planned(3, "flac", false)],
+            subtitles: vec![],
+        };
+        let remuxed = plan.apply(&media);
+        let described: Vec<_> = remuxed
+            .audio
+            .iter()
+            .map(|a| (a.language.as_deref(), a.codec.as_deref(), a.profile.as_deref()))
+            .collect();
+        assert_eq!(
+            described,
+            [
+                (Some("jpn"), Some("flac"), Some("profile")),
+                (Some("eng"), Some("flac"), None)
+            ]
+        );
+        assert!(remuxed.subtitles.is_empty());
+        assert_eq!(remuxed.video_codec.as_deref(), Some("hevc"));
     }
 
     #[test]

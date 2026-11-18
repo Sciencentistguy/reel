@@ -9,8 +9,9 @@ use crate::import::paint;
 use crate::model::Item;
 
 /// Decides what to do with a new file (an item, and where it is) given the library's other
-/// files of the same film or episode.
-pub type Resolve<'a> = &'a dyn Fn(&Item, &Path, &[Item]) -> Result<Choice>;
+/// files of the same film or episode, and whether the item shows the file as remuxing will
+/// leave it.
+pub type Resolve<'a> = &'a dyn Fn(&Item, &Path, &[Item], bool) -> Result<Choice>;
 
 /// What to do with a new file of something the library already has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,15 +27,19 @@ pub enum Choice {
 }
 
 /// Shows `new` (found at `path`) beside the library's `existing` files of the same film or
-/// episode, and asks what to do with it.
+/// episode, and asks what to do with it. When `remuxed`, `new` has the tracks a remux keeps.
 pub fn ask(
     new: &Item,
     path: &Path,
     existing: &[Item],
+    remuxed: bool,
     prompt: impl Fn(&str) -> Result<Option<String>>,
 ) -> Result<Choice> {
     println!("  The library already has this:");
     print!("{}", table(new, path, existing, textwrap::termwidth()));
+    if remuxed {
+        println!("  The new file's tracks are as remuxing will leave them; its size and bitrate are the source's.");
+    }
     let which = match existing.len() {
         1 => String::new(),
         n => format!(" (r1–r{n})"),
@@ -290,9 +295,9 @@ mod tests {
         let old = film("/lib/heat.mkv", 2, "hevc", None);
         let answers = RefCell::new(vec![Some("x"), Some("r")]);
         let prompt = |_: &str| Ok(answers.borrow_mut().remove(0).map(str::to_owned));
-        let choice = ask(&new, &new.path, std::slice::from_ref(&old), prompt).unwrap();
+        let choice = ask(&new, &new.path, std::slice::from_ref(&old), false, prompt).unwrap();
         assert_eq!(choice, Choice::Replace(0));
-        let choice = ask(&new, &new.path, &[old], |_| Ok(None)).unwrap();
+        let choice = ask(&new, &new.path, &[old], false, |_| Ok(None)).unwrap();
         assert_eq!(choice, Choice::Abort);
     }
 }

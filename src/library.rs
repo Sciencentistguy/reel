@@ -350,6 +350,7 @@ impl Library {
                     channels: row.get(4)?,
                     layout: row.get(5)?,
                     atmos: row.get(6)?,
+                    index: None,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -369,6 +370,7 @@ impl Library {
                     codec: row.get(2)?,
                     forced: row.get(3)?,
                     sdh: row.get(4)?,
+                    index: None,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
