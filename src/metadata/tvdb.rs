@@ -84,6 +84,47 @@ fn series_url(id: &str) -> String {
     format!("https://thetvdb.com/?tab=series&id={id}")
 }
 
+#[derive(Debug, PartialEq)]
+enum Entered<'a> {
+    Id(&'a str),
+    Slug(&'a str),
+}
+
+/// Accepts a bare ID, a slug such as `archer-2009`, or a TVDB page URL.
+fn entered_id(input: &str) -> Entered<'_> {
+    let input = input.trim();
+    let (path, query) = input.split_once('?').unwrap_or((input, ""));
+    let query = query.split('#').next().unwrap_or_default();
+    let path = path.split('#').next().unwrap_or_default();
+    let from_query = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("id="))
+        .filter(|id| !id.is_empty());
+    let segment = from_query.unwrap_or_else(|| {
+        if path.contains('/') {
+            let mut segments = path.split('/');
+            segments.find(|segment| *segment == "series");
+            segments.next().unwrap_or(path)
+        } else {
+            path
+        }
+    });
+    if !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        Entered::Id(segment)
+    } else {
+        Entered::Slug(segment)
+    }
+}
+
+/// TVDB disambiguates names with the year, as in `Archer (2009)`; the year is kept separately.
+fn without_year(name: String, year: Option<i32>) -> String {
+    let Some(year) = year else { return name };
+    match name.strip_suffix(&format!(" ({year})")) {
+        Some(stripped) if !stripped.trim().is_empty() => stripped.to_string(),
+        _ => name,
+    }
+}
+
 impl Tvdb {
     pub fn new(config: &MetadataConfig) -> Result<Self> {
         Self::with_base(config, BASE)
@@ -161,18 +202,20 @@ impl ShowSource for Tvdb {
                 let translated_overview = result
                     .overviews
                     .and_then(|mut overviews| overviews.remove(&self.language));
-                let title = translated.unwrap_or_else(|| result.name.clone());
+                let year = result
+                    .year
+                    .and_then(|year| year.parse().ok())
+                    .or_else(|| year_of(result.first_air_time.as_deref()));
+                let name = without_year(result.name, year);
+                let title = translated.map_or_else(|| name.clone(), |t| without_year(t, year));
                 Candidate {
                     source: "tvdb",
                     url: series_url(&result.tvdb_id),
                     id: result.tvdb_id,
-                    original_title: distinct_from(&title, Some(result.name)),
+                    original_title: distinct_from(&title, Some(name)),
                     overview: non_empty(translated_overview).or(non_empty(result.overview)),
                     title,
-                    year: result
-                        .year
-                        .and_then(|year| year.parse().ok())
-                        .or_else(|| year_of(result.first_air_time.as_deref())),
+                    year,
                     runtime: None,
                 }
             })
@@ -180,7 +223,12 @@ impl ShowSource for Tvdb {
     }
 
     fn show(&self, id: &str) -> Result<Candidate> {
-        let series: Series = self.get(&format!("/series/{id}"), &[])?.data;
+        let path = match entered_id(id) {
+            Entered::Id(id) => format!("/series/{id}"),
+            Entered::Slug(slug) => format!("/series/slug/{slug}"),
+        };
+        let series: Series = self.get(&path, &[])?.data;
+        let id = series.id;
         // The base record carries the original-language name; prefer the configured language.
         let translation = self
             .get::<Translation>(&format!("/series/{id}/translations/{}", self.language), &[])
@@ -191,18 +239,20 @@ impl ShowSource for Tvdb {
             .and_then(|translation| translation.name.clone())
             .filter(|name| !name.is_empty());
         let translated_overview = translation.and_then(|translation| translation.overview);
-        let title = translated.unwrap_or_else(|| series.name.clone());
+        let year = series
+            .year
+            .and_then(|year| year.parse().ok())
+            .or_else(|| year_of(series.first_aired.as_deref()));
+        let name = without_year(series.name, year);
+        let title = translated.map_or_else(|| name.clone(), |t| without_year(t, year));
         Ok(Candidate {
             source: "tvdb",
-            url: series_url(&series.id.to_string()),
-            id: series.id.to_string(),
-            original_title: distinct_from(&title, Some(series.name)),
+            url: series_url(&id.to_string()),
+            id: id.to_string(),
+            original_title: distinct_from(&title, Some(name)),
             overview: non_empty(translated_overview).or(non_empty(series.overview)),
             title,
-            year: series
-                .year
-                .and_then(|year| year.parse().ok())
-                .or_else(|| year_of(series.first_aired.as_deref())),
+            year,
             runtime: None,
         })
     }
@@ -428,6 +478,62 @@ mod tests {
         assert_eq!(show.title, "Original Name");
         assert_eq!(show.original_title, None);
         assert_eq!(show.overview.as_deref(), Some("Original overview"));
+    }
+
+    #[test]
+    fn entered_ids_accept_slugs_and_page_urls() {
+        for input in [
+            "110381",
+            " 110381 ",
+            "https://thetvdb.com/?tab=series&id=110381",
+            "https://thetvdb.com/dereferrer/series/110381",
+        ] {
+            assert_eq!(entered_id(input), Entered::Id("110381"), "{input}");
+        }
+        for input in [
+            "archer-2009",
+            "https://thetvdb.com/series/archer-2009",
+            "https://thetvdb.com/series/archer-2009/seasons/official/4",
+            "thetvdb.com/series/archer-2009#overview",
+        ] {
+            assert_eq!(entered_id(input), Entered::Slug("archer-2009"), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_show_can_be_found_by_slug_and_loses_its_disambiguating_year() {
+        let server = Server::start(|request: &Request| match request.path() {
+            "/login" => login(),
+            "/series/slug/archer-2009" => ok(
+                r#"{"data": {"id": 110381, "name": "Archer (2009)", "year": "2009",
+                "overview": "Spies"}}"#,
+            ),
+            "/series/110381/translations/eng" => ok(r#"{"data": {"name": "Archer (2009)"}}"#),
+            _ => (404, "{}".into()),
+        });
+        let show = client(&server)
+            .show("https://thetvdb.com/series/archer-2009")
+            .unwrap();
+        assert_eq!(
+            (show.id.as_str(), show.title.as_str()),
+            ("110381", "Archer")
+        );
+        assert_eq!((show.year, show.original_title), (Some(2009), None));
+    }
+
+    #[test]
+    fn only_a_matching_year_is_removed_from_names() {
+        assert_eq!(without_year("Archer (2009)".into(), Some(2009)), "Archer");
+        assert_eq!(
+            without_year("Archer (2009)".into(), Some(2010)),
+            "Archer (2009)"
+        );
+        assert_eq!(
+            without_year("The Office (US)".into(), Some(2005)),
+            "The Office (US)"
+        );
+        assert_eq!(without_year("(2009)".into(), Some(2009)), "(2009)");
+        assert_eq!(without_year("Archer".into(), None), "Archer");
     }
 
     #[test]
