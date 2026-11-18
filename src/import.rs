@@ -791,7 +791,7 @@ fn apply_episode(
     if let Some(date) = &parsed.air_date {
         let Some(found) = episodes.iter().find(|e| e.air_date.as_ref() == Some(date)) else {
             eprintln!(
-                "  warning: no episode aired on {date}; skipping {}",
+                "  warning: no episode of the show aired on {date} ({})",
                 item.path.display()
             );
             return false;
@@ -816,7 +816,7 @@ fn apply_episode(
             .find(|e| e.season == season && e.number == number)
         else {
             eprintln!(
-                "  warning: s{season:02}e{number:02} is not in the show's episode list; skipping {}",
+                "  warning: s{season:02}e{number:02} is not in the show's episode list ({})",
                 item.path.display()
             );
             return false;
@@ -837,13 +837,104 @@ fn apply_episode(
     true
 }
 
+/// Places an episode file as its name says or, failing that and given a way to `ask`, as the
+/// episode the user names: by number (`s13e05`, `13x05`) or air date, after searching the
+/// episode titles if they like. Returns whether the file was placed.
+fn place_episode(
+    item: &mut Item,
+    parsed: &Parsed,
+    episodes: &[EpisodeInfo],
+    duration: Option<f64>,
+    ask: Option<impl Fn(&str) -> Result<Option<String>>>,
+) -> Result<bool> {
+    if apply_episode(item, parsed, episodes, duration) {
+        return Ok(true);
+    }
+    let skip = |item: &Item| {
+        println!("  Skipping {}.", item.path.display());
+        Ok(false)
+    };
+    let Some(ask) = ask.filter(|_| !episodes.is_empty()) else {
+        return skip(item);
+    };
+    let name = item
+        .path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    loop {
+        let question = format!(
+            "  Which episode is {name}? An episode (s13e05) or air date, words from its title or \
+             a year to search, or blank to skip: "
+        );
+        let Some(answer) = ask(&question)?.filter(|answer| !answer.is_empty()) else {
+            return skip(item);
+        };
+        let given = parse::parse_name(&format!("Show {answer}"));
+        if given.air_date.is_some() || (given.season.is_some() && given.episode.is_some()) {
+            let mut named = parsed.clone();
+            (named.season, named.episode) = (given.season, given.episode);
+            (named.episode_end, named.air_date) = (given.episode_end, given.air_date);
+            if apply_episode(item, &named, episodes, duration) {
+                println!("  Placed as {}.", item.episode_code().unwrap_or_default());
+                return Ok(true);
+            }
+            continue;
+        }
+        let words = answer.to_lowercase();
+        let found: Vec<_> = episodes
+            .iter()
+            .filter(|episode| {
+                let title = episode.title.as_ref();
+                title.is_some_and(|title| title.to_lowercase().contains(&words))
+                    || episode
+                        .air_date
+                        .as_ref()
+                        .is_some_and(|date| date.starts_with(&words))
+            })
+            .collect();
+        if found.is_empty() {
+            println!("  No episode's title or air date matches {answer:?}.");
+        }
+        for episode in found.iter().take(SEARCH_RESULTS) {
+            println!("    {}", describe_listed(episode));
+        }
+        if found.len() > SEARCH_RESULTS {
+            println!(
+                "    … and {} more; search more narrowly.",
+                found.len() - SEARCH_RESULTS
+            );
+        }
+    }
+}
+
+/// How many episodes a title search lists.
+const SEARCH_RESULTS: usize = 20;
+
+/// `s13e05 Summer Solstice (2005-03-27, 1h 30m)`, for picking an episode from a list.
+fn describe_listed(episode: &EpisodeInfo) -> String {
+    let mut details = Vec::new();
+    details.extend(episode.air_date.clone());
+    details.extend(
+        episode
+            .runtime
+            .map(|minutes| human_duration(f64::from(minutes) * 60.0)),
+    );
+    let mut text = describe_episodes(&[episode]);
+    if !details.is_empty() {
+        text += &format!(" ({})", details.join(", "));
+    }
+    text
+}
+
 /// Whether a file running `duration` seconds can be `episodes`, warning when it can't.
 fn fits(item: &Item, duration: Option<f64>, episodes: &[&EpisodeInfo]) -> bool {
     if metadata::episodes_fit(duration, episodes) {
         return true;
     }
     eprintln!(
-        "  warning: {} runs {} but {} runs {}; skipping",
+        "  warning: {} runs {} but {} runs {}",
         item.path.display(),
         human_duration(duration.unwrap_or_default()),
         describe_episodes(episodes),
@@ -1196,7 +1287,14 @@ fn run_with(
                 }
                 Kind::Episode => {
                     let duration = media.as_ref().and_then(|media| media.duration);
-                    if !apply_episode(&mut item, &file.parsed, &episodes, duration) {
+                    let placed = place_episode(
+                        &mut item,
+                        &file.parsed,
+                        &episodes,
+                        duration,
+                        interactive.then_some(prompt),
+                    )?;
+                    if !placed {
                         importer.summary.skipped += 1;
                         continue;
                     }
@@ -1864,6 +1962,58 @@ mod tests {
             "both episodes must fit in the file"
         );
         assert!(place("Show S05E27-E28", 3300.0));
+    }
+
+    #[test]
+    fn an_unplaceable_episode_can_be_placed_by_hand() {
+        let anthology = [
+            EpisodeInfo {
+                season: 13,
+                number: 4,
+                title: Some("Winter Wedding".into()),
+                air_date: Some("2005-02-27".into()),
+                runtime: Some(90),
+            },
+            EpisodeInfo {
+                season: 13,
+                number: 5,
+                title: Some("Summer Solstice".into()),
+                air_date: Some("2005-03-27".into()),
+                runtime: Some(90),
+            },
+        ];
+        let parsed = parse::parse_name("Summer Solstice (2006) - s01e01");
+        let place = |answers: &[&str]| {
+            let answers = RefCell::new(answers.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+            let ask = |_: &str| Ok(Some(answers.borrow_mut().remove(0)));
+            let mut item = Item::new(
+                Kind::Episode,
+                "/in/s.mkv".into(),
+                "Rosamunde Pilcher".into(),
+            );
+            let placed = place_episode(&mut item, &parsed, &anthology, Some(5400.0), Some(ask));
+            placed.unwrap().then_some(item)
+        };
+
+        let item = place(&["solstice", "s13e05"]).expect("placed by number after a search");
+        assert_eq!((item.season, item.episode), (Some(13), Some(5)));
+        assert_eq!(item.episode_title.as_deref(), Some("Summer Solstice"));
+
+        let item = place(&["2005-02-27"]).expect("placed by air date");
+        assert_eq!((item.season, item.episode), (Some(13), Some(4)));
+
+        assert!(
+            place(&["s09e09", ""]).is_none(),
+            "unlisted answers ask again"
+        );
+
+        let mut item = Item::new(
+            Kind::Episode,
+            "/in/s.mkv".into(),
+            "Rosamunde Pilcher".into(),
+        );
+        let never = None::<fn(&str) -> Result<Option<String>>>;
+        assert!(!place_episode(&mut item, &parsed, &anthology, None, never).unwrap());
     }
 
     #[test]

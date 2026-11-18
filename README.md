@@ -140,7 +140,13 @@ Each episode file's running time is also checked against the episode it is numbe
 round episode runtimes and often give nominal ones, so only a file shorter than two thirds or longer
 than half again as long as its episodes (summed, for a multi-episode file) is rejected: a short
 in a special's place, or two episodes filed as one. Such files are skipped with a warning and
-show up in `reel unmatched`. `reel sync` applies the same check to items already in the library,
+show up in `reel unmatched`.
+
+When you're there to answer, a file that can't be placed is asked about instead of skipped: give
+the episode it really is (`s13e05`, `13x05`, `s2006e02`, or an air date such as `2006-02-05`), or
+type words from its title or a year to search the show's episode list, which lists each match's
+air date and runtime. A blank answer skips the file. This is how films in an anthology series, or
+files numbered differently from the source, find their place. `reel sync` applies the same check to items already in the library,
 leaving any that fail untouched and listing them.
 
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
