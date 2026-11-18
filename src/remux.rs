@@ -19,10 +19,38 @@ impl fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
-/// Remuxes `source` into Matroska at `destination`, never overwriting an existing file. The
-/// output is written beside `destination` under a hidden name and only renamed into place once
-/// videoconverter succeeds, so a failed or interrupted remux leaves nothing in the library.
-pub fn remux(program: &str, args: &[String], source: &Path, destination: &Path) -> Result<()> {
+/// One file for `remux`: a source, and where its Matroska goes.
+pub struct Job<'a> {
+    pub source: &'a Path,
+    pub destination: &'a Path,
+}
+
+/// Remuxes every job in one videoconverter run, which converts them in parallel, never
+/// overwriting an existing file. Each output is written beside its destination under a hidden
+/// name and renamed into place only once its conversion has finished, so a failed or interrupted
+/// remux leaves nothing in the library. Returns each job's outcome in order; jobs that Ctrl-C cut
+/// short fail with `Interrupted`.
+pub fn remux(program: &str, args: &[String], jobs: &[Job]) -> Vec<Result<()>> {
+    let mut outcomes: Vec<Result<()>> = jobs.iter().map(|job| prepare(job.destination)).collect();
+    let ready: Vec<&Job> = jobs
+        .iter()
+        .zip(&outcomes)
+        .filter(|(_, outcome)| outcome.is_ok())
+        .map(|(job, _)| job)
+        .collect();
+    if ready.is_empty() {
+        return outcomes;
+    }
+    let status = run(program, args, &ready);
+    for (job, outcome) in jobs.iter().zip(&mut outcomes) {
+        if outcome.is_ok() {
+            *outcome = finish(program, job, &status);
+        }
+    }
+    outcomes
+}
+
+fn prepare(destination: &Path) -> Result<()> {
     if destination.symlink_metadata().is_ok() {
         bail!("destination already exists: {}", destination.display());
     }
@@ -30,19 +58,25 @@ pub fn remux(program: &str, args: &[String], source: &Path, destination: &Path) 
         .parent()
         .context("destination has no parent directory")?;
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-    let partial = partial_path(destination);
-    let _ = fs::remove_file(&partial);
+    let _ = fs::remove_file(partial_path(destination));
+    Ok(())
+}
 
-    let result = run(program, args, source, &partial).and_then(|status| {
-        if status.success() {
-            fs::rename(&partial, destination)
-                .with_context(|| format!("cannot rename {}", partial.display()))
-        } else if interrupted(status) {
-            Err(Interrupted.into())
-        } else {
-            Err(anyhow!("{program} failed ({status}) on {}", source.display()))
-        }
-    });
+fn finish(program: &str, job: &Job, status: &Result<ExitStatus>) -> Result<()> {
+    let partial = partial_path(job.destination);
+    // videoconverter deletes the outputs it didn't finish, unless it was killed before it could.
+    let finished = matches!(status, Ok(status) if status.code().is_some()) && partial.exists();
+    let result = match status {
+        _ if finished => fs::rename(&partial, job.destination)
+            .with_context(|| format!("cannot rename {}", partial.display())),
+        Ok(status) if interrupted(*status) => Err(Interrupted.into()),
+        Ok(status) if status.success() => Err(anyhow!(
+            "{program} produced nothing for {}",
+            job.source.display()
+        )),
+        Ok(status) => Err(anyhow!("{program} failed ({status}) on {}", job.source.display())),
+        Err(err) => Err(anyhow!("{err:#}")),
+    };
     if result.is_err() {
         let _ = fs::remove_file(&partial);
     }
@@ -79,14 +113,17 @@ fn parse_version(line: &str) -> Option<(u32, u32)> {
     Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
 }
 
-fn run(program: &str, args: &[String], source: &Path, output: &Path) -> Result<ExitStatus> {
-    let mut child = Command::new(program)
+fn run(program: &str, args: &[String], jobs: &[&Job]) -> Result<ExitStatus> {
+    let mut command = Command::new(program);
+    command
         .args(["--yes", "--copy-video", "--no-external-subs"])
-        .args(args)
-        .arg("--output")
-        .arg(output)
+        .args(args);
+    for job in jobs {
+        command.arg("--output").arg(partial_path(job.destination));
+    }
+    let mut child = command
         .arg("--")
-        .arg(source)
+        .args(jobs.iter().map(|job| job.source))
         .stdin(Stdio::null())
         .spawn()
         .with_context(|| format!("cannot run {program}"))?;
@@ -145,12 +182,16 @@ mod tests {
 
     use super::*;
 
-    /// A stand-in for videoconverter that runs `body` with the output path in `$out`.
+    /// A stand-in for videoconverter that logs its arguments to `<program>.args`, then runs
+    /// `body` once per output with the output path in `$out` and the input in `$in`.
     fn fake(dir: &Path, body: &str) -> String {
         let path = dir.join("videoconverter");
         let script = format!(
-            "#!/bin/sh\necho \"$@\" > \"$0.args\"\n\
-             while [ \"$1\" != --output ]; do shift; done\nout=$2\n{body}\n"
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\n: > \"$0.outs\"\n\
+             while [ \"$1\" != -- ]; do\n\
+             [ \"$1\" = --output ] && printf '%s\\n' \"$2\" >> \"$0.outs\"\nshift\ndone\nshift\n\
+             status=0\nwhile IFS= read -r out; do in=$1; shift; {body}\ndone < \"$0.outs\"\n\
+             exit $status\n"
         );
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -164,6 +205,14 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    fn one(program: &str, args: &[String], destination: &Path) -> Result<()> {
+        let job = Job {
+            source: Path::new("source.mp4"),
+            destination,
+        };
+        remux(program, args, &[job]).pop().unwrap()
     }
 
     fn version_script(dir: &Path, output: &str) -> String {
@@ -204,50 +253,83 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = fake(dir.path(), "echo remuxed > \"$out\"");
         let destination = dir.path().join("Film (2000)/Film (2000).mkv");
-        remux(&program, &[], Path::new("source.mp4"), &destination).unwrap();
+        one(&program, &[], &destination).unwrap();
         assert_eq!(fs::read_to_string(&destination).unwrap(), "remuxed\n");
         assert_eq!(entries(destination.parent().unwrap()), ["Film (2000).mkv"]);
     }
 
     #[test]
+    fn one_run_remuxes_every_job_and_reports_each() {
+        let dir = tempfile::tempdir().unwrap();
+        // Like videoconverter, it fails overall when one input fails and deletes that output.
+        let program = fake(
+            dir.path(),
+            "if [ \"$in\" = bad.mp4 ]; then status=1; else echo \"$in\" > \"$out\"; fi",
+        );
+        let [a, bad, c] = ["a.mkv", "bad.mkv", "c.mkv"].map(|name| dir.path().join(name));
+        let jobs = [("a.mp4", &a), ("bad.mp4", &bad), ("c.mp4", &c)].map(|(source, destination)| {
+            Job {
+                source: Path::new(source),
+                destination,
+            }
+        });
+        let outcomes = remux(&program, &[], &jobs);
+        assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
+        assert!(format!("{:#}", outcomes[1].as_ref().unwrap_err()).contains("bad.mp4"));
+        assert_eq!(fs::read_to_string(&c).unwrap(), "c.mp4\n");
+        assert!(!bad.exists() && !partial_path(&bad).exists());
+        let args = fs::read_to_string(format!("{program}.args")).unwrap();
+        assert_eq!(args.matches("--output").count(), 3, "{args}");
+        assert!(args.ends_with("-- a.mp4 bad.mp4 c.mp4\n"), "{args}");
+    }
+
+    #[test]
     fn a_failed_remux_leaves_no_files() {
         let dir = tempfile::tempdir().unwrap();
-        let program = fake(dir.path(), "echo partial > \"$out\"; exit 1");
+        let program = fake(dir.path(), "status=1");
         let destination = dir.path().join("out/Film.mkv");
-        let err = remux(&program, &[], Path::new("source.mp4"), &destination).unwrap_err();
+        let err = one(&program, &[], &destination).unwrap_err();
         assert!(!err.is::<Interrupted>());
         assert!(entries(&dir.path().join("out")).is_empty());
     }
 
     #[test]
-    fn exit_status_130_means_interrupted() {
+    fn interrupted_remuxes_fail_and_finished_ones_are_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let program = fake(dir.path(), "echo partial > \"$out\"; exit 130");
-        let destination = dir.path().join("Film.mkv");
-        let err = remux(&program, &[], Path::new("source.mp4"), &destination).unwrap_err();
-        assert!(err.is::<Interrupted>());
-        assert!(!partial_path(&destination).exists());
+        let program = fake(
+            dir.path(),
+            "[ \"$in\" = a.mp4 ] && echo done > \"$out\"; status=130",
+        );
+        let [a, b] = ["a.mkv", "b.mkv"].map(|name| dir.path().join(name));
+        let jobs = [("a.mp4", &a), ("b.mp4", &b)].map(|(source, destination)| Job {
+            source: Path::new(source),
+            destination,
+        });
+        let outcomes = remux(&program, &[], &jobs);
+        assert!(outcomes[0].is_ok() && a.exists());
+        assert!(outcomes[1].as_ref().unwrap_err().is::<Interrupted>());
     }
 
     #[test]
-    fn existing_destinations_are_never_overwritten() {
+    fn existing_destinations_are_never_overwritten_or_passed_on() {
         let dir = tempfile::tempdir().unwrap();
         let program = fake(dir.path(), "echo remuxed > \"$out\"");
         let destination = dir.path().join("Film.mkv");
         fs::write(&destination, "original").unwrap();
-        assert!(remux(&program, &[], Path::new("source.mp4"), &destination).is_err());
+        assert!(one(&program, &[], &destination).is_err());
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
+        assert!(!Path::new(&format!("{program}.args")).exists(), "nothing left to run");
     }
 
     #[test]
-    fn extra_arguments_come_before_the_output_and_source() {
+    fn extra_arguments_come_before_the_outputs_and_sources() {
         let dir = tempfile::tempdir().unwrap();
         let program = fake(dir.path(), "touch \"$out\"");
         let destination = dir.path().join("Film.mkv");
-        remux(&program, &["--anime".into()], Path::new("in.mkv"), &destination).unwrap();
+        one(&program, &["--anime".into()], &destination).unwrap();
         let args = fs::read_to_string(format!("{program}.args")).unwrap();
         let expected = format!(
-            "--yes --copy-video --no-external-subs --anime --output {} -- in.mkv\n",
+            "--yes --copy-video --no-external-subs --anime --output {} -- source.mp4\n",
             partial_path(&destination).display()
         );
         assert_eq!(args, expected);

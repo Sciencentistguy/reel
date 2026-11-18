@@ -1167,49 +1167,53 @@ impl Importer<'_> {
         self.library.save(&mut item)
     }
 
-    /// Runs the queued remuxes in turn, stopping at Ctrl-C.
+    /// Runs the queued remuxes, all in one videoconverter run so they go in parallel.
     fn remux_queued(&mut self) {
         let queued = std::mem::take(&mut self.queued);
-        let total = queued.len();
-        for (index, job) in queued.into_iter().enumerate() {
-            println!(
-                "\nRemuxing ({}/{total}) {}",
-                index + 1,
-                job.source.display()
-            );
-            let Err(err) = self.remux(job) else { continue };
-            if err.is::<remux::Interrupted>() {
-                let left = total - index;
-                self.summary.imported -= left;
-                self.summary.skipped += left;
-                println!("Interrupted; {left} file(s) left unimported.");
-                return;
+        if queued.is_empty() {
+            return;
+        }
+        println!("\nRemuxing {} file(s)", queued.len());
+        let jobs: Vec<_> = queued
+            .iter()
+            .map(|job| remux::Job {
+                source: &job.source,
+                destination: &job.destination,
+            })
+            .collect();
+        let outcomes = remux::remux(&self.config.import.videoconverter, &self.remux_args, &jobs);
+        let mut interrupted = 0;
+        for (job, outcome) in queued.into_iter().zip(outcomes) {
+            let root = naming::library_root(self.config, job.item.kind).to_path_buf();
+            let parent = job.destination.parent().map(Path::to_path_buf);
+            let source = job.source.clone();
+            let Err(err) = outcome.and_then(|()| self.record_remux(job)) else {
+                continue;
+            };
+            if let Some(parent) = parent {
+                fileops::prune_empty_dirs(&parent, &root);
             }
-            eprintln!("  error: {err:#}");
             self.summary.imported -= 1;
             self.summary.skipped += 1;
+            if err.is::<remux::Interrupted>() {
+                interrupted += 1;
+            } else {
+                eprintln!("  error: {}: {err:#}", source.display());
+            }
+        }
+        if interrupted > 0 {
+            println!("Interrupted; {interrupted} file(s) left unimported.");
         }
     }
 
-    fn remux(&mut self, job: QueuedRemux) -> Result<()> {
+    /// Records a finished remux, describing the new file rather than its source.
+    fn record_remux(&mut self, job: QueuedRemux) -> Result<()> {
         let QueuedRemux {
             mut item,
             source,
             destination,
         } = job;
-        let config = &self.config.import;
-        if let Err(err) = remux::remux(
-            &config.videoconverter,
-            &self.remux_args,
-            &source,
-            &destination,
-        ) {
-            if let Some(parent) = destination.parent() {
-                fileops::prune_empty_dirs(parent, naming::library_root(self.config, item.kind));
-            }
-            return Err(err);
-        }
-        if config.subtitles {
+        if self.config.import.subtitles {
             for (sidecar, suffix) in naming::sidecars(&source) {
                 let target = naming::sidecar_destination(&destination, &suffix);
                 if let Err(err) = fileops::transfer(&sidecar, &target, Operation::Copy) {
@@ -1217,7 +1221,6 @@ impl Importer<'_> {
                 }
             }
         }
-        // The remux drops streams, so the library describes the new file, not the source.
         if self.probe {
             match probe::probe(&destination) {
                 Ok(media) => {
@@ -2528,7 +2531,7 @@ mod tests {
             "videoconverter",
             &format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && echo videoconverter 0.5.0 && exit\n\
-                 while [ \"$1\" != --output ]; do shift; done\nout=$2\n{body}\n"
+                 for arg; do [ \"$prev\" = --output ] && out=$arg && {{ {body}; }}; prev=$arg; done\n"
             ),
         );
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();

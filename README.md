@@ -170,11 +170,14 @@ left where it is, as with `copy`, and sidecar subtitles are copied beside the ne
 muxed in.
 
 Before asking anything, reel runs `videoconverter --version` and stops if the program is missing
-or older than 0.5. Remuxes are queued and run one after another once every group has been
-decided, so no prompt waits on one. Each is written under a hidden `.….partial.mkv` name and renamed into place when it
-succeeds, and only then recorded in the database, with media information probed from the new file.
-A failed remux is reported and skipped; Ctrl-C stops the current one and leaves the rest
-unimported, as does Ctrl-C at a prompt beforehand.
+or older than 0.5. Remuxes are queued until every group has been decided, so no prompt waits on
+one, and then all handed to a single videoconverter, which runs them in parallel: one per CPU core
+unless `remux_args` includes something like `["--parallel", "2"]`, which suits spinning disks or
+network storage better. Each is written under a hidden `.….partial.mkv` name and renamed into
+place when it succeeds, and only then recorded in the database, with media information probed from
+the new file. A failed remux is reported and skipped without holding up the others; Ctrl-C stops
+the remuxes still running and leaves those files unimported, as does Ctrl-C at a prompt
+beforehand.
 
 `remux_args` adds videoconverter arguments to every remux, and `--remux-arg` (repeatable) adds
 more for one import, such as `reel import -o remux --remux-arg=--anime Frieren/`.
