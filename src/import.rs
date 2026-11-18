@@ -485,6 +485,17 @@ fn print_candidate(label: &str, candidate: &Candidate, distance: f64, in_library
     print_details(candidate);
 }
 
+/// How a file is listed when asked for: a film's filename is enough to recognise it, while a
+/// show's episodes may be spread across folders.
+fn file_label(kind: Kind, path: &Path) -> String {
+    match kind {
+        Kind::Movie => path.file_name().unwrap_or(path.as_os_str()),
+        Kind::Episode => path.as_os_str(),
+    }
+    .to_string_lossy()
+    .into_owned()
+}
+
 fn decide(
     group: &Group,
     lookup: &Lookup,
@@ -570,7 +581,7 @@ fn decide(
                 ""
             };
             let Some(answer) = prompt(&format!(
-                "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d{edition_choice}, a[b]ort? [{default}] "
+                "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d{edition_choice}, [p]aths, a[b]ort? [{default}] "
             ))?
             else {
                 return Ok(Decision::Abort);
@@ -584,6 +595,11 @@ fn decide(
                 "s" => return Ok(Decision::Skip),
                 "u" => return Ok(Decision::AsIs),
                 "b" => return Ok(Decision::Abort),
+                "p" => {
+                    for file in &group.files {
+                        println!("    {}", file_label(group.kind, &file.path));
+                    }
+                }
                 "e" => {
                     let Some(new_title) = prompt("  Title: ")? else {
                         return Ok(Decision::Abort);
@@ -1250,6 +1266,16 @@ mod tests {
             timid,
             &mut None,
         )
+    }
+
+    #[test]
+    fn films_are_listed_by_filename_and_episodes_by_path() {
+        let path = Path::new("/in/Show/Season 1/Show.S01E01.mkv");
+        assert_eq!(file_label(Kind::Movie, path), "Show.S01E01.mkv");
+        assert_eq!(
+            file_label(Kind::Episode, path),
+            "/in/Show/Season 1/Show.S01E01.mkv"
+        );
     }
 
     #[test]
