@@ -176,10 +176,27 @@ impl Drop for IgnoreInterrupts {
     }
 }
 
+/// Writes an executable script from a child process. Tests run in parallel threads, and one
+/// that forks while this process holds the script open for writing would make running it fail
+/// as busy, so this process never opens it.
+#[cfg(all(test, unix))]
+pub fn write_script(path: &Path, script: &str) {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    let mut child = Command::new("sh")
+        .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
-
     use super::*;
 
     /// A stand-in for videoconverter that logs its arguments to `<program>.args`, then runs
@@ -193,8 +210,7 @@ mod tests {
              status=0\nwhile IFS= read -r out; do in=$1; shift; {body}\ndone < \"$0.outs\"\n\
              exit $status\n"
         );
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, &script);
         path.to_string_lossy().into_owned()
     }
 
@@ -217,8 +233,7 @@ mod tests {
 
     fn version_script(dir: &Path, output: &str) -> String {
         let path = dir.join("videoconverter");
-        fs::write(&path, format!("#!/bin/sh\necho stty noise >&2\n{output}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(&path, &format!("#!/bin/sh\necho stty noise >&2\n{output}\n"));
         path.to_string_lossy().into_owned()
     }
 

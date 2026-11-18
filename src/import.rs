@@ -2531,15 +2531,14 @@ mod tests {
     /// path in `$out`.
     #[cfg(unix)]
     fn fake_videoconverter(env: &mut Env, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let program = env.write(
-            "videoconverter",
+        let program = env.path("videoconverter");
+        remux::write_script(
+            &program,
             &format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && echo videoconverter 0.5.0 && exit\n\
                  for arg; do [ \"$prev\" = --output ] && out=$arg && {{ {body}; }}; prev=$arg; done\n"
             ),
         );
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         env.config.import.videoconverter = program.to_string_lossy().into_owned();
         env.config.import.operation = Operation::Remux;
     }
@@ -2565,11 +2564,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_old_videoconverter_stops_the_import_before_anything_happens() {
-        use std::os::unix::fs::PermissionsExt;
         let mut env = Env::new();
         fake_videoconverter(&mut env, "touch \"$out\"");
-        let program = env.write("old", "#!/bin/sh\necho videoconverter 0.4.0\n");
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = env.path("old");
+        remux::write_script(&program, "#!/bin/sh\necho videoconverter 0.4.0\n");
         env.config.import.videoconverter = program.to_string_lossy().into_owned();
         env.write("in/Heat.1995.mkv", "video");
 
