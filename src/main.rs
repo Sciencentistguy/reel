@@ -17,6 +17,7 @@ mod parse;
 mod probe;
 mod query;
 mod sync;
+mod unmatched;
 
 use config::Config;
 use library::Library;
@@ -68,6 +69,8 @@ enum Command {
     Sync(sync::Options),
     /// List aired episodes of shows that have no file in the library.
     Missing(missing::Options),
+    /// List video files in the library folders that are not in the database.
+    Unmatched,
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
         #[arg(short = 'n', long, visible_alias = "dry-run")]
@@ -151,6 +154,7 @@ fn run(cli: Cli) -> Result<()> {
         ),
         Command::Sync(options) => sync::run(&config, &mut open_library()?, &options),
         Command::Missing(options) => missing::run(&config, &open_library()?, &options),
+        Command::Unmatched => unmatched::run(&config, &open_library()?),
         Command::Update {
             pretend,
             force,
@@ -363,6 +367,7 @@ mod tests {
         reel(&["move", "--pretend"]).unwrap();
         reel(&["update", "--yes"]).unwrap();
         reel(&["missing"]).unwrap();
+        reel(&["unmatched"]).unwrap();
         reel(&["purge", "--yes"]).unwrap();
         assert_eq!(count(&[]), 1);
 
