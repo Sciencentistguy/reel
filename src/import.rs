@@ -325,6 +325,8 @@ fn colour_percent(percent: f64, colour: bool) -> String {
 
 /// How many of the best candidates have their running times or episode lists fetched.
 const DETAIL_LOOKUPS: usize = 3;
+/// The least a show loses from its match for having any unmatched files.
+const UNMATCHED_PENALTY: f64 = 0.02;
 
 /// The running time of a film group's file, if it is a single, whole film.
 fn measure(group: &Group) -> Result<Option<Length>> {
@@ -376,9 +378,9 @@ fn has_placements(group: &Group) -> bool {
         })
 }
 
-/// Extra distance for a show whose episode list lacks many of the files' episodes, such as a
-/// miniseries sharing its name with a long-running show. A few gaps are expected from specials,
-/// new episodes and numbering quirks.
+/// Extra distance for a show whose episode list lacks any of the files' episodes, such as a
+/// miniseries sharing its name with a long-running show: a flat amount, so a single unmatched
+/// file shows in the match percentage, plus more the larger the share unmatched.
 fn missing_episode_penalty(files: &[Pending], episodes: &[EpisodeInfo]) -> f64 {
     let checked: Vec<bool> = files
         .iter()
@@ -388,7 +390,11 @@ fn missing_episode_penalty(files: &[Pending], episodes: &[EpisodeInfo]) -> f64 {
         return 0.0;
     }
     let missing = checked.iter().filter(|&&found| !found).count() as f64 / checked.len() as f64;
-    if missing <= 0.05 { 0.0 } else { missing / 2.0 }
+    if missing == 0.0 {
+        0.0
+    } else {
+        UNMATCHED_PENALTY + missing / 2.0
+    }
 }
 
 /// Whether `episodes` has the episode, or every episode, a file names; `None` when the file
@@ -511,10 +517,7 @@ fn print_candidate(
     let episodes = candidate.episodes.as_deref().map_or(String::new(), |list| {
         match unlisted(files, candidate) {
             0 => format!(", {}", EpisodeCount::of(list)),
-            missing => format!(
-                ", {}, lacks {missing} file(s)' episodes",
-                EpisodeCount::of(list)
-            ),
+            missing => format!(", {}, {missing} file(s) unmatched", EpisodeCount::of(list)),
         }
     });
     println!(
@@ -553,22 +556,21 @@ fn decide(
     {
         let found = lookup.by_id(id).map(|candidate| match lookup {
             Lookup::Show(source) if has_placements(group) => {
-                with_episode_lists(*source, &group.files, vec![(0.0, candidate)], 1)
-                    .remove(0)
-                    .1
+                with_episode_lists(*source, &group.files, vec![(0.0, candidate)], 1).remove(0)
             }
-            _ => candidate,
+            _ => (0.0, candidate),
         });
         match found {
-            Ok(candidate) if timid => named_by_id = Some(candidate),
-            Ok(candidate) if !covers(group, &candidate) => {
+            Ok(named) if timid => named_by_id = Some(named),
+            Ok((distance, candidate)) if !covers(group, &candidate) => {
                 println!(
-                    "  {source}-{id} lacks the episodes of {} file(s).",
-                    unlisted(&group.files, &candidate)
+                    "  {source}-{id}: {} file(s) unmatched ({}).",
+                    unlisted(&group.files, &candidate),
+                    match_percent(distance)
                 );
-                named_by_id = Some(candidate);
+                named_by_id = Some((distance, candidate));
             }
-            Ok(candidate) => {
+            Ok((_, candidate)) => {
                 println!(
                     "  Matched by ID: {} [{source}-{id}]",
                     describe_candidate(&candidate)
@@ -590,9 +592,9 @@ fn decide(
             lookup.search(&title, year)?,
             |ranked| timid || searched_manually || !metadata::is_strong(ranked, threshold),
         );
-        if let Some(named) = named_by_id.take() {
+        if let Some((distance, named)) = named_by_id.take() {
             ranked.retain(|(_, found)| (found.source, &found.id) != (named.source, &named.id));
-            ranked.insert(0, (0.0, named));
+            ranked.insert(0, (distance, named));
         }
         if !timid && !searched_manually && is_confident(group, &ranked, threshold) {
             let (distance, candidate) = ranked.into_iter().next().unwrap();
@@ -1727,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn only_widespread_gaps_in_an_episode_list_are_penalised() {
+    fn any_gap_in_an_episode_list_is_penalised() {
         let listed = |count: u32| -> Vec<EpisodeInfo> {
             (1..=count)
                 .map(|number| EpisodeInfo {
@@ -1742,13 +1744,16 @@ mod tests {
             .map(|number| pending(&format!("/in/Show.S01E{number:02}.mkv")))
             .collect();
         assert_eq!(missing_episode_penalty(&files, &listed(20)), 0.0);
-        assert_eq!(missing_episode_penalty(&files, &listed(19)), 0.0);
-        assert_eq!(missing_episode_penalty(&files, &listed(0)), 0.5);
+        assert!(
+            missing_episode_penalty(&files, &listed(19)) >= 0.02,
+            "a single unmatched file costs a visible amount"
+        );
+        assert_eq!(missing_episode_penalty(&files, &listed(0)), 0.52);
         assert!(missing_episode_penalty(&files, &listed(6)) > 0.3);
 
         let dated = [pending("/in/Show.2011.11.15.mkv")];
         let mut by_date = listed(1);
-        assert_eq!(missing_episode_penalty(&dated, &by_date), 0.5);
+        assert_eq!(missing_episode_penalty(&dated, &by_date), 0.52);
         by_date[0].air_date = Some("2011-11-15".into());
         assert_eq!(missing_episode_penalty(&dated, &by_date), 0.0);
     }

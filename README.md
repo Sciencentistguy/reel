@@ -125,13 +125,14 @@ and credits. The penalty is lighter for files with an edition, which may legitim
 shorter. Running times are shown beside the candidates when you are asked to choose.
 
 Shows are checked against their episode lists. A show is only chosen without asking, whether by
-name, by an ID tag or by an entered ID, when its list has every file's episode; one that lacks
-any is offered as a candidate instead, so `--quiet` skips the group. When the match is uncertain,
-or the best candidate lacks episodes, the best few candidates' lists are fetched and each is
-ranked down by the share of files whose episode it lacks (beyond 5%), so a six-part miniseries
-cannot claim a hundred files from the long-running show it shares a name with. Episode counts,
-and how many files each candidate lacks, are shown beside the candidates. If you choose a show
-anyway, files whose episodes it doesn't list are skipped.
+name, by an ID tag or by an entered ID, when its list has every file's episode; one that leaves any
+file unmatched is offered as a candidate instead, so `--quiet` skips the group. When the match is
+uncertain, or the best candidate lacks episodes, the best few candidates' lists are fetched and
+each is ranked down for files whose episode it lacks: 2 points for any at all, plus half the share
+unmatched, so a six-part miniseries cannot claim a hundred files from the long-running show it
+shares a name with. Episode counts, and how many files are unmatched (`3 file(s) unmatched`), are
+shown beside the candidates. If you choose a show anyway, files whose episodes it doesn't list are
+skipped.
 
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
