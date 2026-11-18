@@ -288,6 +288,32 @@ impl Item {
             && self.media.resolution == other.media.resolution
     }
 
+    /// The fields this item needs to be identified and named that it lacks.
+    pub fn missing_metadata(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.source.is_none() || self.source_id.is_none() {
+            missing.push("source");
+        }
+        match self.kind {
+            Kind::Movie if self.year.is_none() => missing.push("year"),
+            Kind::Movie => {}
+            Kind::Episode if self.date_based => {
+                if self.air_date.is_none() {
+                    missing.push("air date");
+                }
+            }
+            Kind::Episode => {
+                if self.season.is_none() {
+                    missing.push("season");
+                }
+                if self.episode.is_none() {
+                    missing.push("episode");
+                }
+            }
+        }
+        missing
+    }
+
     pub fn episode_code(&self) -> Option<String> {
         if self.date_based {
             return self.air_date.clone();

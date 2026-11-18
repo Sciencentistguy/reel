@@ -92,6 +92,16 @@ enum Command {
         #[arg(required = true)]
         query: Vec<String>,
     },
+    /// Remove items lacking the metadata needed to identify and name them.
+    Purge {
+        /// Also delete the files (and their sidecar subtitles) from disk.
+        #[arg(short, long)]
+        delete: bool,
+        /// Do not ask for confirmation.
+        #[arg(short, long)]
+        yes: bool,
+        query: Vec<String>,
+    },
     /// Summarise the library, or the part of it matching a query.
     Stats { query: Vec<String> },
     /// List the fields usable in queries and format templates.
@@ -154,6 +164,13 @@ fn run(cli: Cli) -> Result<()> {
             yes,
         ),
         Command::Remove { delete, yes, query } => commands::remove(
+            &config,
+            &mut open_library()?,
+            &Query::parse(&query)?,
+            delete,
+            yes,
+        ),
+        Command::Purge { delete, yes, query } => commands::purge(
             &config,
             &mut open_library()?,
             &Query::parse(&query)?,
@@ -346,6 +363,7 @@ mod tests {
         reel(&["move", "--pretend"]).unwrap();
         reel(&["update", "--yes"]).unwrap();
         reel(&["missing"]).unwrap();
+        reel(&["purge", "--yes"]).unwrap();
         assert_eq!(count(&[]), 1);
 
         reel(&["remove", "--yes", "--delete", "heat"]).unwrap();

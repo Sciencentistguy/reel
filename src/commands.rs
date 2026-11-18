@@ -1,4 +1,4 @@
-//! Library maintenance commands: list, info, move, update, remove and stats.
+//! Library maintenance commands: list, info, move, update, remove, purge and stats.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -265,6 +265,45 @@ pub fn remove(
     for item in &items {
         println!("{item}");
     }
+    remove_items(config, library, &items, delete, assume_yes)
+}
+
+/// Removes items whose metadata lacks what they need to be identified and named.
+pub fn purge(
+    config: &Config,
+    library: &mut Library,
+    query: &Query,
+    delete: bool,
+    assume_yes: bool,
+) -> Result<()> {
+    let incomplete: Vec<Item> = library
+        .query(query)?
+        .into_iter()
+        .filter(|item| !item.missing_metadata().is_empty())
+        .collect();
+    if incomplete.is_empty() {
+        println!("No items with incomplete metadata.");
+        return Ok(());
+    }
+    for item in &incomplete {
+        println!(
+            "{} (no {})\n  {}",
+            item,
+            item.missing_metadata().join(", "),
+            item.path.display()
+        );
+    }
+    remove_items(config, library, &incomplete, delete, assume_yes)
+}
+
+/// Asks, unless `assume_yes`, then drops the items' rows and, with `delete`, their files.
+fn remove_items(
+    config: &Config,
+    library: &mut Library,
+    items: &[Item],
+    delete: bool,
+    assume_yes: bool,
+) -> Result<()> {
     if !assume_yes {
         let action = if delete {
             "Remove from the library AND DELETE the files"
@@ -277,7 +316,7 @@ pub fn remove(
             return Ok(());
         }
     }
-    for item in &items {
+    for item in items {
         if delete {
             let sidecars = naming::sidecars(&item.path);
             for path in std::iter::once(item.path.clone()).chain(sidecars.into_iter().map(|s| s.0))
@@ -745,6 +784,53 @@ mod tests {
 
         assert_eq!(fixture.paths(), [ronin.path]);
         assert!(heat.path.exists());
+    }
+
+    #[test]
+    fn items_lacking_identifying_metadata_are_incomplete() {
+        let mut film = Item::new(Kind::Movie, "/m.mkv".into(), "Heat".into());
+        assert_eq!(film.missing_metadata(), ["source", "year"]);
+        (film.source, film.source_id, film.year) =
+            (Some("tmdb".into()), Some("949".into()), Some(1995));
+        assert!(film.missing_metadata().is_empty());
+
+        let mut episode = Item::new(Kind::Episode, "/e.mkv".into(), "Show".into());
+        (episode.source, episode.source_id) = (Some("tvdb".into()), Some("1".into()));
+        episode.season = Some(1);
+        assert_eq!(episode.missing_metadata(), ["episode"]);
+        episode.episode = Some(1);
+        assert!(
+            episode.missing_metadata().is_empty(),
+            "titles may be unknown"
+        );
+
+        episode.date_based = true;
+        assert_eq!(episode.missing_metadata(), ["air date"]);
+    }
+
+    #[test]
+    fn purge_removes_only_incomplete_items() {
+        let mut fixture = Fixture::new();
+        let heat = fixture.film("Movies/heat.mkv", None);
+        let mut unidentified = Item::new(
+            Kind::Movie,
+            fixture.write("Movies/ronin.mkv", "x"),
+            "Ronin".into(),
+        );
+        unidentified.year = Some(1998);
+        fixture.library.save(&mut unidentified).unwrap();
+
+        purge(
+            &fixture.config,
+            &mut fixture.library,
+            &Query::default(),
+            true,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(fixture.paths(), [heat.path]);
+        assert!(!unidentified.path.exists());
     }
 
     #[test]

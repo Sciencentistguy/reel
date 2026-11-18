@@ -100,6 +100,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
+| `reel purge [QUERY]` | Remove items lacking a source, year, or episode numbering (`-d` also deletes the files) |
 | `reel stats [QUERY]` | Summarise the library |
 | `reel fields` | List fields usable in queries and templates |
 | `reel config` | Show the effective configuration |
@@ -152,6 +153,12 @@ and prints the episodes no file covers, grouped by show. Multi-episode files cou
 episode they span, and date-based files are matched by air date. Episodes with a future air
 date are left out, as are specials (season 0) unless `--specials` (`-s`) is given.
 
+`reel purge` removes items whose metadata is incomplete: anything not matched to a source, films
+without a year, and episodes without a season and episode number (or, for daily shows, an air
+date). Missing episode titles don't count, since sources often fill them in later and `reel sync`
+picks them up. It lists each item with what it lacks and asks first, like `reel remove`, and takes
+the same `--delete` and `--yes` flags; a query narrows it to part of the library.
+
 Handled along the way:
 
 - Plex `{tmdb-…}`/`{tvdb-…}` tags already present in names are used for a direct lookup.
@@ -201,7 +208,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `naming` | Plex-convention paths, sidecar subtitle discovery |
 | `probe` | ffprobe invocation and interpretation |
 | `library`, `query` | SQLite storage and query compilation |
-| `commands` | list, info, move, update, remove, stats |
+| `commands` | list, info, move, update, remove, purge, stats |
 | `sync` | Refreshing identified items from their metadata source |
 | `missing` | Listing episodes of shows that have no file |
 
