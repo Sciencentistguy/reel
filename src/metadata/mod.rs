@@ -233,7 +233,7 @@ pub(crate) fn non_empty(text: Option<String>) -> Option<String> {
     text.filter(|text| !text.is_empty())
 }
 
-fn normalise(title: &str) -> String {
+pub(crate) fn normalise(title: &str) -> String {
     let lowered = title.to_lowercase().replace('&', " and ");
     let kept: String = lowered
         .chars()

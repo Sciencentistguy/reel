@@ -72,7 +72,7 @@ enum Command {
     Missing(missing::Options),
     /// List video files in the library folders that are not in the database.
     Unmatched,
-    /// List episode files whose running time doesn't fit the episode they are matched to.
+    /// List episode files whose length or own title contradicts the episode they are matched to.
     Check(check::Options),
     /// Re-probe changed files and drop entries whose files have gone.
     Update {

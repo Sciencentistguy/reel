@@ -99,7 +99,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
 | `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
 | `reel unmatched` | List video files in the library folders that are not in the database |
-| `reel check [QUERY]` | List episode files whose running time doesn't fit the episode they are matched to |
+| `reel check [QUERY]` | List episode files whose length or own title doesn't fit the episode they are matched to |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel purge [QUERY]` | Remove items lacking a source, year, or episode numbering (`-d` also deletes the files) |
@@ -174,12 +174,18 @@ no row for, usually ones an import or rescan couldn't match. They are grouped by
 folder they sit in, labelled with what the library has there (or `nothing in the library`), with
 loose files in a root listed separately. `reel rescan` tries to match them again.
 
-`reel check` applies the import's length check to episodes already in the library, without
-changing anything: each matching file's running time is compared with the runtime its source now
-gives the episode it is matched to, and the misfits are listed by show. A misfit usually means the
-files are numbered one off from the source, from a duplicate or an extra filed as an episode, so
-the files around it are often wrong too. Files numbered as episodes the source doesn't list, and
-files never probed, are counted rather than checked.
+`reel check` looks for episode files that aren't the episode they are matched to, without
+changing anything, and lists them by show. It applies the import's length check against the
+runtime the source now gives each episode, and it compares the titles a file gives itself, in its
+container's title tag (`embedded_title`) and in its current and original file names, with the
+source's episode titles. A file whose title clearly names another episode of the show is listed
+with that episode, which catches two episodes swapped within a season, or a whole run numbered
+one off, even when every file is the same length. Titles must be close (80% alike) and clearly
+closer to the other episode than to the matched one, so `Part 1` and `Part 2` are never told apart
+this way, and a file whose names and tag carry no episode title can only be length-checked.
+Files numbered as episodes the source doesn't list, and files never probed, are counted rather
+than checked; title tags are recorded when files are probed, so `reel update --force` fills them
+in for items imported before reel kept them.
 
 `reel purge` removes items whose metadata is incomplete: anything not matched to a source, films
 without a year, and episodes without a season and episode number (or, for daily shows, an air
@@ -240,7 +246,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `sync` | Refreshing identified items from their metadata source |
 | `missing` | Listing episodes of shows that have no file |
 | `unmatched` | Listing library files that are not in the database |
-| `check` | Listing episode files too long or short for their match |
+| `check` | Listing episode files whose length or title contradicts their match |
 
 ## Potential future work
 
