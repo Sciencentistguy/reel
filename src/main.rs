@@ -66,7 +66,7 @@ enum Command {
     },
     /// Refresh identified items from their metadata source and rename files to match.
     Sync(sync::Options),
-    /// List aired episodes of identified shows that have no file in the library.
+    /// List aired episodes of shows that have no file in the library.
     Missing(missing::Options),
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
@@ -310,8 +310,19 @@ mod tests {
              [import]\nprobe = false\n",
         )
         .unwrap();
-        std::fs::create_dir_all(dir.path().join("in")).unwrap();
-        std::fs::write(dir.path().join("in/Heat.1995.1080p.mkv"), "video").unwrap();
+        let film = dir
+            .path()
+            .join("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv");
+        std::fs::create_dir_all(film.parent().unwrap()).unwrap();
+        std::fs::write(&film, "video").unwrap();
+        {
+            let mut library = Library::open(&dir.path().join("library.db")).unwrap();
+            let mut item = Item::new(Kind::Movie, film.clone(), "Heat".into());
+            item.year = Some(1995);
+            (item.source, item.source_id) = (Some("tmdb".into()), Some("949".into()));
+            (item.size, item.mtime) = import::file_stamp(&film).unwrap();
+            library.save(&mut item).unwrap();
+        }
 
         let reel = |args: &[&str]| {
             let config = config.to_str().unwrap();
@@ -323,15 +334,7 @@ mod tests {
             let library = Library::open(&dir.path().join("library.db")).unwrap();
             library.query(&Query::parse(terms).unwrap()).unwrap().len()
         };
-        let input = dir.path().join("in");
-        let input = input.to_str().unwrap();
 
-        reel(&["import", "--asis", "--quiet", input]).unwrap();
-        assert!(
-            dir.path()
-                .join("Movies/Heat (1995)/Heat (1995).mkv")
-                .exists()
-        );
         assert_eq!(count(&[]), 1);
 
         reel(&["list"]).unwrap();
@@ -347,7 +350,7 @@ mod tests {
 
         reel(&["remove", "--yes", "--delete", "heat"]).unwrap();
         assert_eq!(count(&[]), 0);
-        assert!(!dir.path().join("Movies/Heat (1995)").exists());
+        assert!(!film.parent().unwrap().exists());
 
         assert!(
             reel(&["list", "year:abc"]).is_err(),

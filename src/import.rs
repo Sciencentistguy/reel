@@ -10,7 +10,7 @@ use rustyline::error::ReadlineError;
 use walkdir::WalkDir;
 
 use crate::commands::human_duration;
-use crate::config::{Config, Operation};
+use crate::config::{Config, MetadataConfig, Operation};
 use crate::fileops;
 use crate::library::Library;
 use crate::metadata::{
@@ -56,9 +56,6 @@ pub struct Options {
     /// Treat every file as this kind instead of guessing from its name.
     #[arg(short, long, value_enum)]
     pub kind: Option<Kind>,
-    /// Skip metadata lookups and name files from what their current names say.
-    #[arg(short = 'A', long)]
-    pub asis: bool,
     /// Always ask which match to use, even when one is certain (overrides the configuration).
     #[arg(long, conflicts_with = "no_timid")]
     pub timid: bool,
@@ -78,9 +75,6 @@ pub struct Rescan {
     /// Show what would happen without touching the database.
     #[arg(short = 'n', long, visible_alias = "dry-run")]
     pub pretend: bool,
-    /// Skip metadata lookups and take titles from the current names.
-    #[arg(short = 'A', long)]
-    pub asis: bool,
     /// Always ask which match to use, even when one is certain (overrides the configuration).
     #[arg(long, conflicts_with = "no_timid")]
     pub timid: bool,
@@ -108,7 +102,6 @@ struct Group {
 
 enum Decision {
     Use(Candidate),
-    AsIs,
     Skip,
     Abort,
 }
@@ -581,7 +574,7 @@ fn decide(
                 ""
             };
             let Some(answer) = prompt(&format!(
-                "  # selection, [s]kip, [u]se as-is, [e]nter search, enter [i]d{edition_choice}, [p]aths, a[b]ort? [{default}] "
+                "  # selection, [s]kip, [e]nter search, enter [i]d{edition_choice}, [p]aths, a[b]ort? [{default}] "
             ))?
             else {
                 return Ok(Decision::Abort);
@@ -593,7 +586,6 @@ fn decide(
             };
             match answer.as_str() {
                 "s" => return Ok(Decision::Skip),
-                "u" => return Ok(Decision::AsIs),
                 "b" => return Ok(Decision::Abort),
                 "p" => {
                     for file in &group.files {
@@ -662,15 +654,11 @@ fn decide(
     }
 }
 
-fn base_item(group: &Group, file: &Pending, candidate: Option<&Candidate>) -> Item {
-    let mut item = Item::new(group.kind, file.path.clone(), group.title.clone());
-    item.year = group.year;
-    if let Some(candidate) = candidate {
-        item.title = candidate.title.clone();
-        item.year = candidate.year.or(group.year);
-        item.source = Some(candidate.source.to_string());
-        item.source_id = Some(candidate.id.clone());
-    }
+fn base_item(group: &Group, file: &Pending, candidate: &Candidate) -> Item {
+    let mut item = Item::new(group.kind, file.path.clone(), candidate.title.clone());
+    item.year = candidate.year.or(group.year);
+    item.source = Some(candidate.source.to_string());
+    item.source_id = Some(candidate.id.clone());
     item
 }
 
@@ -690,16 +678,12 @@ fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<E
 }
 
 /// Fills in the episode fields of `item`. Returns `false` when the file cannot be placed.
-fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: Option<&[EpisodeInfo]>) -> bool {
+fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> bool {
     item.season = parsed.season;
     item.episode = parsed.episode;
     item.episode_end = parsed.episode_end;
     item.air_date = parsed.air_date.clone();
     item.date_based = parsed.air_date.is_some();
-    let Some(episodes) = episodes else {
-        item.episode_title = parsed.episode_title.clone();
-        return true;
-    };
 
     if let Some(date) = &parsed.air_date {
         let Some(found) = episodes.iter().find(|e| e.air_date.as_ref() == Some(date)) else {
@@ -870,13 +854,60 @@ impl Importer<'_> {
     }
 }
 
+/// Where imports are looked up. Each source is only connected when first needed.
+trait Sources {
+    fn movies(&mut self) -> Result<&dyn MovieSource>;
+    fn shows(&mut self) -> Result<&dyn ShowSource>;
+}
+
+/// The metadata services the configuration names.
+struct Online<'a> {
+    config: &'a MetadataConfig,
+    movies: Option<Box<dyn MovieSource>>,
+    shows: Option<Box<dyn ShowSource>>,
+}
+
+impl<'a> Online<'a> {
+    fn new(config: &'a MetadataConfig) -> Self {
+        Online {
+            config,
+            movies: None,
+            shows: None,
+        }
+    }
+}
+
+impl Sources for Online<'_> {
+    fn movies(&mut self) -> Result<&dyn MovieSource> {
+        if self.movies.is_none() {
+            self.movies = Some(metadata::movie_source(self.config)?);
+        }
+        Ok(self.movies.as_deref().unwrap())
+    }
+
+    fn shows(&mut self) -> Result<&dyn ShowSource> {
+        if self.shows.is_none() {
+            self.shows = Some(metadata::show_source(self.config)?);
+        }
+        Ok(self.shows.as_deref().unwrap())
+    }
+}
+
 pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<()> {
-    run_with(config, library, options, false)
+    let mut sources = Online::new(&config.metadata);
+    run_with(config, library, options, false, &mut sources)
 }
 
 /// Adds files that are in the library folders but missing from the database, leaving them where
 /// they are; `reel move` can rename them afterwards.
 pub fn rescan(config: &Config, library: &mut Library, rescan: Rescan) -> Result<()> {
+    let options = rescan_options(config, rescan)?;
+    let mut sources = Online::new(&config.metadata);
+    run_with(config, library, &options, true, &mut sources)
+}
+
+/// Import options that look in the library's own folders unless `rescan` names others.
+fn rescan_options(config: &Config, rescan: Rescan) -> Result<Options> {
     let paths = if rescan.paths.is_empty() {
         let roots: Vec<_> = [&config.library.movies, &config.library.tv]
             .into_iter()
@@ -893,20 +924,24 @@ pub fn rescan(config: &Config, library: &mut Library, rescan: Rescan) -> Result<
     } else {
         rescan.paths
     };
-    let options = Options {
+    Ok(Options {
         paths,
         operation: None,
         quiet: rescan.quiet,
         pretend: rescan.pretend,
         kind: None,
-        asis: rescan.asis,
         timid: rescan.timid,
         no_timid: rescan.no_timid,
-    };
-    run_with(config, library, &options, true)
+    })
 }
 
-fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bool) -> Result<()> {
+fn run_with(
+    config: &Config,
+    library: &mut Library,
+    options: &Options,
+    adopt: bool,
+    sources: &mut dyn Sources,
+) -> Result<()> {
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
@@ -944,8 +979,6 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
     }
 
     let interactive = !options.quiet && io::stdin().is_terminal();
-    let mut movies: Option<Box<dyn MovieSource>> = None;
-    let mut shows: Option<Box<dyn ShowSource>> = None;
     let mut importer = Importer {
         config,
         library,
@@ -959,7 +992,7 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
         summary: Summary::default(),
     };
 
-    let mut can_measure = config.import.probe && !options.asis;
+    let mut can_measure = config.import.probe;
     for mut group in group(pending) {
         let label = match group.kind {
             Kind::Movie => "film",
@@ -981,36 +1014,21 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
         }
 
         let mut edition = None;
-        let decision = if options.asis {
-            Decision::AsIs
-        } else {
-            let lookup = match group.kind {
-                Kind::Movie => {
-                    if movies.is_none() {
-                        movies = Some(metadata::movie_source(&config.metadata)?);
-                    }
-                    Lookup::Movie(movies.as_deref().unwrap())
-                }
-                Kind::Episode => {
-                    if shows.is_none() {
-                        shows = Some(metadata::show_source(&config.metadata)?);
-                    }
-                    Lookup::Show(shows.as_deref().unwrap())
-                }
-            };
-            decide(
-                &group,
-                &lookup,
-                importer.library,
-                config.import.strong_match,
-                interactive,
-                (config.import.timid || options.timid) && !options.no_timid,
-                &mut edition,
-            )?
+        let lookup = match group.kind {
+            Kind::Movie => Lookup::Movie(sources.movies()?),
+            Kind::Episode => Lookup::Show(sources.shows()?),
         };
+        let decision = decide(
+            &group,
+            &lookup,
+            importer.library,
+            config.import.strong_match,
+            interactive,
+            (config.import.timid || options.timid) && !options.no_timid,
+            &mut edition,
+        )?;
         let candidate = match decision {
-            Decision::Use(candidate) => Some(candidate),
-            Decision::AsIs => None,
+            Decision::Use(candidate) => candidate,
             Decision::Skip => {
                 importer.summary.skipped += group.files.len();
                 continue;
@@ -1018,14 +1036,12 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
             Decision::Abort => break,
         };
 
-        let episodes = match (&candidate, group.kind, shows.as_deref()) {
-            (Some(candidate), Kind::Episode, Some(source)) => {
-                Some(fetch_episodes(source, &candidate.id, &group.files))
-            }
-            _ => None,
+        let episodes = match lookup {
+            Lookup::Show(source) => fetch_episodes(source, &candidate.id, &group.files),
+            Lookup::Movie(_) => Vec::new(),
         };
         for (index, file) in group.files.iter().enumerate() {
-            let mut item = base_item(&group, file, candidate.as_ref());
+            let mut item = base_item(&group, file, &candidate);
             match group.kind {
                 Kind::Movie => {
                     item.edition = edition
@@ -1034,7 +1050,7 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
                     item.part = file.parsed.part;
                 }
                 Kind::Episode => {
-                    if !apply_episode(&mut item, &file.parsed, episodes.as_deref()) {
+                    if !apply_episode(&mut item, &file.parsed, &episodes) {
                         importer.summary.skipped += 1;
                         continue;
                     }
@@ -1113,7 +1129,7 @@ mod tests {
         ]
     }
 
-    fn applied(name: &str, episodes: Option<&[EpisodeInfo]>) -> Option<Item> {
+    fn applied(name: &str, episodes: &[EpisodeInfo]) -> Option<Item> {
         let parsed = parse::parse_name(name);
         let mut item = Item::new(Kind::Episode, "/in/file.mkv".into(), parsed.title.clone());
         apply_episode(&mut item, &parsed, episodes).then_some(item)
@@ -1121,7 +1137,7 @@ mod tests {
 
     #[test]
     fn episode_titles_come_from_metadata() {
-        let item = applied("Show S01E01-E02 Wrong Title", Some(&episodes())).unwrap();
+        let item = applied("Show S01E01-E02 Wrong Title", &episodes()).unwrap();
         assert_eq!(item.episode_title.as_deref(), Some("Pilot (1) & Pilot (2)"));
         assert_eq!(item.episode_code().as_deref(), Some("s01e01-e02"));
         assert_eq!(item.air_date.as_deref(), Some("2010-01-01"));
@@ -1129,17 +1145,11 @@ mod tests {
 
     #[test]
     fn dates_resolve_to_seasons() {
-        let item = applied("Show 2011.11.15 HDTV", Some(&episodes())).unwrap();
+        let item = applied("Show 2011.11.15 HDTV", &episodes()).unwrap();
         assert_eq!((item.season, item.episode), (Some(8), Some(20)));
         assert_eq!(item.episode_title.as_deref(), Some("Elijah Wood"));
         assert_eq!(item.episode_code().as_deref(), Some("2011-11-15"));
-        assert!(applied("Show 2011.11.16 HDTV", Some(&episodes())).is_none());
-    }
-
-    #[test]
-    fn as_is_keeps_parsed_titles() {
-        let item = applied("Show S01E03 Parsed Title 720p", None).unwrap();
-        assert_eq!(item.episode_title.as_deref(), Some("Parsed Title"));
+        assert!(applied("Show 2011.11.16 HDTV", &episodes()).is_none());
     }
 
     #[test]
@@ -1323,18 +1333,14 @@ mod tests {
     fn base_items_take_identity_from_the_match() {
         let group = group_of("/in/Heat.1996.mkv");
         let file = &group.files[0];
-        let plain = base_item(&group, file, None);
-        assert_eq!((plain.title.as_str(), plain.year), ("Heat", Some(1996)));
-        assert_eq!(plain.source, None);
-
-        let matched = base_item(&group, file, Some(&candidate("Heat", 1995, "949")));
+        let matched = base_item(&group, file, &candidate("Heat", 1995, "949"));
         assert_eq!(matched.year, Some(1995));
         assert_eq!(matched.source.as_deref(), Some("tmdb"));
         assert_eq!(matched.source_id.as_deref(), Some("949"));
 
         let mut undated = candidate("Heat", 1995, "949");
         undated.year = None;
-        assert_eq!(base_item(&group, file, Some(&undated)).year, Some(1996));
+        assert_eq!(base_item(&group, file, &undated).year, Some(1996));
     }
 
     #[test]
@@ -1640,14 +1646,14 @@ mod tests {
 
     #[test]
     fn unlisted_episodes_are_imported_without_a_title() {
-        let item = applied("Show S05E09 Parsed Title", Some(&episodes())).unwrap();
+        let item = applied("Show S05E09 Parsed Title", &episodes()).unwrap();
         assert_eq!(item.episode_title, None);
         assert_eq!(item.episode_code().as_deref(), Some("s05e09"));
     }
 
     #[test]
     fn files_without_episode_numbers_cannot_be_placed() {
-        assert!(applied("Show Special Feature", Some(&episodes())).is_none());
+        assert!(applied("Show Special Feature", &episodes()).is_none());
     }
 
     fn write(dir: &Path, relative: &str, contents: &str) -> PathBuf {
@@ -1699,10 +1705,100 @@ mod tests {
         assert!(error.to_string().contains("cannot access"));
     }
 
+    /// A metadata service that knows every title it is asked about, exactly as it was asked,
+    /// numbering each new one from 1.
+    #[derive(Default)]
+    struct Echo {
+        known: RefCell<Vec<Candidate>>,
+        /// The episode list every show has.
+        episodes: Vec<EpisodeInfo>,
+    }
+
+    impl Echo {
+        fn search(&self, source: &'static str, title: &str, year: Option<i32>) -> Vec<Candidate> {
+            let mut known = self.known.borrow_mut();
+            let existing = known
+                .iter()
+                .find(|work| work.source == source && work.title == title && work.year == year);
+            let work = match existing {
+                Some(work) => work.clone(),
+                None => {
+                    let work = Candidate {
+                        source,
+                        id: (known.len() + 1).to_string(),
+                        title: title.into(),
+                        year,
+                        url: String::new(),
+                        original_title: None,
+                        overview: None,
+                        runtime: None,
+                        episode_count: None,
+                    };
+                    known.push(work.clone());
+                    work
+                }
+            };
+            vec![work]
+        }
+
+        fn by_id(&self, source: &str, id: &str) -> Result<Candidate> {
+            self.known
+                .borrow()
+                .iter()
+                .find(|work| work.source == source && work.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow!("no {source}-{id}"))
+        }
+    }
+
+    impl MovieSource for Echo {
+        fn search_movies(&self, title: &str, year: Option<i32>) -> Result<Vec<Candidate>> {
+            Ok(self.search("tmdb", title, year))
+        }
+
+        fn movie(&self, id: &str) -> Result<Candidate> {
+            self.by_id("tmdb", id)
+        }
+    }
+
+    impl ShowSource for Echo {
+        fn name(&self) -> &'static str {
+            "tvdb"
+        }
+
+        fn search_shows(&self, title: &str, year: Option<i32>) -> Result<Vec<Candidate>> {
+            Ok(self.search("tvdb", title, year))
+        }
+
+        fn show(&self, id: &str) -> Result<Candidate> {
+            self.by_id("tvdb", id)
+        }
+
+        fn episodes(&self, _: &str, season: Option<u32>) -> Result<Vec<EpisodeInfo>> {
+            Ok(self
+                .episodes
+                .iter()
+                .filter(|episode| season.is_none_or(|season| episode.season == season))
+                .cloned()
+                .collect())
+        }
+    }
+
+    impl Sources for Echo {
+        fn movies(&mut self) -> Result<&dyn MovieSource> {
+            Ok(self)
+        }
+
+        fn shows(&mut self) -> Result<&dyn ShowSource> {
+            Ok(self)
+        }
+    }
+
     struct Env {
         dir: tempfile::TempDir,
         config: Config,
         library: Library,
+        sources: Echo,
     }
 
     impl Env {
@@ -1716,6 +1812,7 @@ mod tests {
                 dir,
                 config,
                 library: Library::in_memory().unwrap(),
+                sources: Echo::default(),
             }
         }
 
@@ -1728,7 +1825,13 @@ mod tests {
         }
 
         fn import(&mut self, options: &Options) -> Result<()> {
-            run(&self.config, &mut self.library, options)
+            run_with(
+                &self.config,
+                &mut self.library,
+                options,
+                false,
+                &mut self.sources,
+            )
         }
 
         fn rescan(&mut self, paths: &[&str], pretend: bool) -> Result<()> {
@@ -1736,11 +1839,17 @@ mod tests {
                 paths: paths.iter().map(|path| self.path(path)).collect(),
                 quiet: true,
                 pretend,
-                asis: true,
                 timid: false,
                 no_timid: false,
             };
-            super::rescan(&self.config, &mut self.library, rescan)
+            let options = rescan_options(&self.config, rescan)?;
+            run_with(
+                &self.config,
+                &mut self.library,
+                &options,
+                true,
+                &mut self.sources,
+            )
         }
 
         fn rows(&self) -> Vec<Item> {
@@ -1761,7 +1870,6 @@ mod tests {
             quiet: true,
             pretend: false,
             kind: None,
-            asis: true,
             timid: false,
             no_timid: false,
         }
@@ -1773,7 +1881,7 @@ mod tests {
         let source = env.write("in/Heat.1995.1080p.BluRay.mkv", "video");
         env.import(&options(&env, &["in"])).unwrap();
 
-        let destination = env.path("Movies/Heat (1995)/Heat (1995).mkv");
+        let destination = env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv");
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), "video");
         assert!(source.exists(), "copying leaves the source");
 
@@ -1794,6 +1902,12 @@ mod tests {
     fn importing_an_episode_files_it_by_season() {
         let mut env = Env::new();
         env.write("in/Show.Name.S02E03.Some.Title.720p.mkv", "video");
+        env.sources.episodes = vec![EpisodeInfo {
+            season: 2,
+            number: 3,
+            title: Some("Some Title".into()),
+            air_date: None,
+        }];
         env.import(&options(&env, &["in"])).unwrap();
 
         let rows = env.rows();
@@ -1802,7 +1916,7 @@ mod tests {
         assert_eq!((rows[0].season, rows[0].episode), (Some(2), Some(3)));
         assert_eq!(
             rows[0].path,
-            env.path("TV/Show Name/Season 02/Show Name - s02e03 - Some Title.mkv")
+            env.path("TV/Show Name {tvdb-1}/Season 02/Show Name - s02e03 - Some Title.mkv")
         );
         assert!(rows[0].path.exists());
     }
@@ -1857,9 +1971,9 @@ mod tests {
         env.write("in/Heat.1995.fr.srt", "sub");
         env.import(&options(&env, &["in"])).unwrap();
 
-        let folder = env.path("Movies/Heat (1995)");
-        assert!(folder.join("Heat (1995).en.forced.srt").exists());
-        assert!(folder.join("Heat (1995).fr.srt").exists());
+        let folder = env.path("Movies/Heat (1995) {tmdb-1}");
+        assert!(folder.join("Heat (1995) {tmdb-1}.en.forced.srt").exists());
+        assert!(folder.join("Heat (1995) {tmdb-1}.fr.srt").exists());
     }
 
     #[test]
@@ -1869,7 +1983,10 @@ mod tests {
         env.write("in/Heat.1995.mkv", "video");
         env.write("in/Heat.1995.en.srt", "sub");
         env.import(&options(&env, &["in"])).unwrap();
-        assert!(!env.path("Movies/Heat (1995)/Heat (1995).en.srt").exists());
+        assert!(
+            !env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.en.srt")
+                .exists()
+        );
     }
 
     #[test]
@@ -1880,7 +1997,7 @@ mod tests {
         env.import(&options(&env, &["in"])).unwrap();
 
         assert_eq!(env.rows().len(), 1);
-        let folder: Vec<_> = std::fs::read_dir(env.path("Movies/Heat (1995)"))
+        let folder: Vec<_> = std::fs::read_dir(env.path("Movies/Heat (1995) {tmdb-1}"))
             .unwrap()
             .collect();
         assert_eq!(folder.len(), 1);
@@ -1902,17 +2019,20 @@ mod tests {
         env.import(&options(&env, &["in"])).unwrap();
         assert_eq!(
             env.paths(),
-            [env.path("Movies/Heat (1995)/Heat (1995).mkv")]
+            [env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv")]
         );
 
         env.write("in2/Heat.1995.2160p.mkv", "better video");
         env.import(&options(&env, &["in2"])).unwrap();
         assert_eq!(env.rows().len(), 2);
         assert!(
-            env.path("Movies/Heat (1995)/Heat (1995) - 2160p.mkv")
+            env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1} - 2160p.mkv")
                 .exists()
         );
-        assert!(env.path("Movies/Heat (1995)/Heat (1995).mkv").exists());
+        assert!(
+            env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv")
+                .exists()
+        );
 
         crate::commands::move_items(
             &env.config,
@@ -1924,8 +2044,8 @@ mod tests {
         assert_eq!(
             env.paths(),
             [
-                env.path("Movies/Heat (1995)/Heat (1995) - 1080p.mkv"),
-                env.path("Movies/Heat (1995)/Heat (1995) - 2160p.mkv"),
+                env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1} - 1080p.mkv"),
+                env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1} - 2160p.mkv"),
             ]
         );
     }
@@ -1933,7 +2053,10 @@ mod tests {
     #[test]
     fn existing_unregistered_files_are_never_overwritten() {
         let mut env = Env::new();
-        let occupied = env.write("Movies/Heat (1995)/Heat (1995).mkv", "precious");
+        let occupied = env.write(
+            "Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv",
+            "precious",
+        );
         env.write("in/Heat.1995.mkv", "newcomer");
         env.import(&options(&env, &["in"])).unwrap();
 
@@ -2051,7 +2174,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             env.paths(),
-            [env.path("Movies/Heat (1995)/Heat (1995).mkv")]
+            [env.path("Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv")]
         );
         assert!(!env.path("Movies/messy").exists());
     }

@@ -134,8 +134,7 @@ impl Tvdb {
         if config.tvdb_api_key.is_empty() {
             bail!(
                 "no TVDB API key configured: set metadata.tvdb_api_key or TVDB_API_KEY \
-                 (https://thetvdb.com/api-information), set metadata.tv_source = \"tmdb\", \
-                 or import with --asis"
+                 (https://thetvdb.com/api-information), or set metadata.tv_source = \"tmdb\""
             );
         }
         Ok(Tvdb {

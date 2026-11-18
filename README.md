@@ -97,7 +97,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
 | `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
-| `reel missing [QUERY]` | List aired episodes of identified shows with no file (`-s` includes specials) |
+| `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel stats [QUERY]` | Summarise the library |
@@ -109,10 +109,11 @@ module writes the system-wide `/etc/reel/config.toml`.
 `reel import` walks the given paths, guesses a title, year and episode numbering from each file
 name (falling back to parent directories), and groups files by film or show. Each group is looked
 up once. A confident match is applied automatically; otherwise you choose from the candidates,
-search again, enter an ID (or paste a TMDB or TVDB page URL, or a TVDB slug), use the names as they are, set the edition for every file in a film's
+search again, enter an ID (or paste a TMDB or TVDB page URL, or a TVDB slug), set the edition for every file in a film's
 group (overriding any `{edition-…}` in the names), list the group's files, or skip. `--quiet` never prompts and skips
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
-names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--asis` skips lookups altogether, and `--pretend` (or `--dry-run`) shows what would happen.
+names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--pretend` (or `--dry-run`) shows what would happen.
+Everything imported is matched to TMDB or TVDB; files that can't be matched are skipped.
 
 An entered ID or URL is shown with its match percentage. A confident match is used straight
 away, as with search results; otherwise, or in timid mode, you are asked to confirm it.
@@ -132,21 +133,20 @@ Episode counts are shown beside the candidates.
 `reel rescan` rebuilds missing database rows. It walks the library's film and TV folders (or the
 paths given), identifies files the database doesn't know about exactly as `import` does, and
 records them where they are. Nothing is moved or renamed; run `reel move` afterwards to bring the
-names in line with the naming scheme. It accepts the same `--quiet`, `--timid`, `--no-timid`,
-`--asis` and `--pretend` flags, and never removes rows (that's `reel update`).
+names in line with the naming scheme. It accepts the same `--quiet`, `--timid`, `--no-timid`
+and `--pretend` flags, and never removes rows (that's `reel update`).
 
 `reel sync` refreshes items that were matched to TMDB or TVDB. It fetches each film or show once
 from the source it was matched against (even if `tv_source` has changed since), updates titles,
 years, episode titles and air dates, and prints what changed. Files are then renamed to match, as
 `reel move` would; `--no-move` (`-M`) only updates the database, and `--pretend` shows what would
 happen. Episodes that were "TBA" at import time are the usual beneficiaries. Fields the source
-leaves blank keep their current values, and items imported with `--asis` are left alone.
+leaves blank keep their current values.
 
-`reel missing` fetches the full episode list of every identified show among the matching items
+`reel missing` fetches the full episode list of every show among the matching items
 and prints the episodes no file covers, grouped by show. Multi-episode files count for each
 episode they span, and date-based files are matched by air date. Episodes with a future air
-date are left out, as are specials (season 0) unless `--specials` (`-s`) is given. Episodes
-imported with `--asis` have no source to compare against, so are skipped and counted.
+date are left out, as are specials (season 0) unless `--specials` (`-s`) is given.
 
 Handled along the way:
 
@@ -199,7 +199,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, stats |
 | `sync` | Refreshing identified items from their metadata source |
-| `missing` | Listing episodes of identified shows that have no file |
+| `missing` | Listing episodes of shows that have no file |
 
 ## Potential future work
 

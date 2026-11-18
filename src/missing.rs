@@ -21,7 +21,7 @@ pub struct Options {
 
 pub fn run(config: &Config, library: &Library, options: &Options) -> Result<()> {
     let items = library.query(&Query::parse(&options.query)?)?;
-    let (shows, unidentified) = shows(items);
+    let shows = shows(items);
     let today = today();
     let mut sources: HashMap<String, Box<dyn ShowSource>> = HashMap::new();
     let (mut total, mut failed) = (0, 0);
@@ -58,26 +58,18 @@ pub fn run(config: &Config, library: &Library, options: &Options) -> Result<()> 
     if failed > 0 {
         println!("Could not fetch episode lists for {failed} show(s).");
     }
-    if unidentified > 0 {
-        println!(
-            "Skipped {unidentified} episode file(s) not matched to a metadata source; \
-             import them without --asis to include their shows."
-        );
-    }
     Ok(())
 }
 
-/// Groups episode files by the show they were matched to, counting those matched to none.
-fn shows(items: Vec<Item>) -> (BTreeMap<(String, String), Vec<Item>>, usize) {
+/// Groups episode files by the show they were matched to.
+fn shows(items: Vec<Item>) -> BTreeMap<(String, String), Vec<Item>> {
     let mut shows: BTreeMap<_, Vec<_>> = BTreeMap::new();
-    let mut unidentified = 0;
     for item in items.into_iter().filter(|item| item.kind == Kind::Episode) {
-        match (item.source.clone(), item.source_id.clone()) {
-            (Some(source), Some(id)) => shows.entry((source, id)).or_default().push(item),
-            _ => unidentified += 1,
+        if let (Some(source), Some(id)) = (item.source.clone(), item.source_id.clone()) {
+            shows.entry((source, id)).or_default().push(item);
         }
     }
-    (shows, unidentified)
+    shows
 }
 
 /// The aired episodes no file covers, in the order the source lists them.
@@ -237,19 +229,19 @@ mod tests {
     }
 
     #[test]
-    fn shows_group_identified_episodes_and_count_the_rest() {
+    fn shows_group_episodes_by_their_match() {
         let identified = |id: &str| {
             let mut item = file(1, 1, None);
             item.source = Some("tvdb".into());
             item.source_id = Some(id.into());
             item
         };
-        let film = Item::new(Kind::Movie, PathBuf::from("/m.mkv"), "Film".into());
-        let (shows, unidentified) = shows(vec![
+        let mut film = Item::new(Kind::Movie, PathBuf::from("/m.mkv"), "Film".into());
+        (film.source, film.source_id) = (Some("tmdb".into()), Some("1".into()));
+        let shows = shows(vec![
             identified("1"),
             identified("1"),
             identified("2"),
-            file(1, 1, None),
             film,
         ]);
         let sizes: Vec<_> = shows
@@ -257,7 +249,6 @@ mod tests {
             .map(|((_, id), items)| (id.as_str(), items.len()))
             .collect();
         assert_eq!(sizes, [("1", 2), ("2", 1)]);
-        assert_eq!(unidentified, 1);
     }
 
     #[test]

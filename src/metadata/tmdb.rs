@@ -105,7 +105,7 @@ impl Tmdb {
         if config.tmdb_api_key.is_empty() {
             bail!(
                 "no TMDB API key configured: set metadata.tmdb_api_key or TMDB_API_KEY \
-                 (free keys: https://www.themoviedb.org/settings/api), or import with --asis"
+                 (free keys: https://www.themoviedb.org/settings/api)"
             );
         }
         Ok(Tmdb {
