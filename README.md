@@ -97,6 +97,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
 | `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
+| `reel missing [QUERY]` | List aired episodes of identified shows with no file (`-s` includes specials) |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel stats [QUERY]` | Summarise the library |
@@ -140,6 +141,12 @@ years, episode titles and air dates, and prints what changed. Files are then ren
 `reel move` would; `--no-move` (`-M`) only updates the database, and `--pretend` shows what would
 happen. Episodes that were "TBA" at import time are the usual beneficiaries. Fields the source
 leaves blank keep their current values, and items imported with `--asis` are left alone.
+
+`reel missing` fetches the full episode list of every identified show among the matching items
+and prints the episodes no file covers, grouped by show. Multi-episode files count for each
+episode they span, and date-based files are matched by air date. Episodes with a future air
+date are left out, as are specials (season 0) unless `--specials` (`-s`) is given. Episodes
+imported with `--asis` have no source to compare against, so are skipped and counted.
 
 Handled along the way:
 
@@ -192,6 +199,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `library`, `query` | SQLite storage and query compilation |
 | `commands` | list, info, move, update, remove, stats |
 | `sync` | Refreshing identified items from their metadata source |
+| `missing` | Listing episodes of identified shows that have no file |
 
 ## Potential future work
 

@@ -10,6 +10,7 @@ mod fileops;
 mod import;
 mod library;
 mod metadata;
+mod missing;
 mod model;
 mod naming;
 mod parse;
@@ -65,6 +66,8 @@ enum Command {
     },
     /// Refresh identified items from their metadata source and rename files to match.
     Sync(sync::Options),
+    /// List aired episodes of identified shows that have no file in the library.
+    Missing(missing::Options),
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
         #[arg(short = 'n', long, visible_alias = "dry-run")]
@@ -137,6 +140,7 @@ fn run(cli: Cli) -> Result<()> {
             pretend,
         ),
         Command::Sync(options) => sync::run(&config, &mut open_library()?, &options),
+        Command::Missing(options) => missing::run(&config, &open_library()?, &options),
         Command::Update {
             pretend,
             force,
@@ -264,6 +268,7 @@ mod tests {
         assert!(parse(&["stats"]).is_ok());
         assert!(parse(&["rescan"]).is_ok());
         assert!(parse(&["sync", "-nM", "kind:episode"]).is_ok());
+        assert!(parse(&["missing", "--specials", "title:lost"]).is_ok());
     }
 
     #[test]
@@ -337,6 +342,7 @@ mod tests {
         reel(&["config"]).unwrap();
         reel(&["move", "--pretend"]).unwrap();
         reel(&["update", "--yes"]).unwrap();
+        reel(&["missing"]).unwrap();
         assert_eq!(count(&[]), 1);
 
         reel(&["remove", "--yes", "--delete", "heat"]).unwrap();
