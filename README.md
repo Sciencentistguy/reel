@@ -52,8 +52,8 @@ tmdb_language = "en-US"
 tvdb_language = "eng"
 ```
 
-The `remux` operation needs a [videoconverter](https://github.com/Sciencentistguy/videoconverter)
-recent enough to have `--output` and `--no-external-subs`; see [Remuxing](#remuxing).
+The `remux` operation needs [videoconverter](https://github.com/Sciencentistguy/videoconverter)
+0.5 or later; see [Remuxing](#remuxing).
 
 Films are always matched against TMDB. Shows are matched against TVDB by default, or TMDB with
 `tv_source = "tmdb"`. `ffprobe` (from ffmpeg) must be on `PATH` for media information.
