@@ -216,7 +216,7 @@ impl ShowSource for Tvdb {
                     title,
                     year,
                     runtime: None,
-                    episode_count: None,
+                    episodes: None,
                 }
             })
             .collect())
@@ -254,7 +254,7 @@ impl ShowSource for Tvdb {
             title,
             year,
             runtime: None,
-            episode_count: None,
+            episodes: None,
         })
     }
 
@@ -401,7 +401,7 @@ mod tests {
                 original_title: Some("Doctor Who".into()),
                 overview: Some("English overview".into()),
                 runtime: None,
-                episode_count: None,
+                episodes: None,
             }
         );
         assert_eq!(found[1].title, "Plain Show");

@@ -380,18 +380,9 @@ fn has_placements(group: &Group) -> bool {
 /// miniseries sharing its name with a long-running show. A few gaps are expected from specials,
 /// new episodes and numbering quirks.
 fn missing_episode_penalty(files: &[Pending], episodes: &[EpisodeInfo]) -> f64 {
-    let listed = |parsed: &Parsed| match (&parsed.air_date, parsed.season, parsed.episode) {
-        (Some(date), _, _) => Some(episodes.iter().any(|e| e.air_date.as_ref() == Some(date))),
-        (None, Some(season), Some(number)) => Some(
-            episodes
-                .iter()
-                .any(|e| e.season == season && e.number == number),
-        ),
-        _ => None,
-    };
     let checked: Vec<bool> = files
         .iter()
-        .filter_map(|file| listed(&file.parsed))
+        .filter_map(|file| listed(&file.parsed, episodes))
         .collect();
     if checked.is_empty() {
         return 0.0;
@@ -400,23 +391,64 @@ fn missing_episode_penalty(files: &[Pending], episodes: &[EpisodeInfo]) -> f64 {
     if missing <= 0.05 { 0.0 } else { missing / 2.0 }
 }
 
-/// Checks the best candidates' episode lists against the files and re-ranks.
+/// Whether `episodes` has the episode, or every episode, a file names; `None` when the file
+/// names none.
+fn listed(parsed: &Parsed, episodes: &[EpisodeInfo]) -> Option<bool> {
+    if let Some(date) = &parsed.air_date {
+        return Some(episodes.iter().any(|e| e.air_date.as_ref() == Some(date)));
+    }
+    let (season, first) = (parsed.season?, parsed.episode?);
+    let last = parsed.episode_end.unwrap_or(first).max(first);
+    Some((first..=last).all(|number| {
+        episodes
+            .iter()
+            .any(|e| e.season == season && e.number == number)
+    }))
+}
+
+/// How many files name an episode that `candidate`'s fetched episode list lacks; all of them
+/// with a placement when the list hasn't been fetched.
+fn unlisted(files: &[Pending], candidate: &Candidate) -> usize {
+    let episodes = candidate.episodes.as_deref().unwrap_or_default();
+    files
+        .iter()
+        .filter(|file| listed(&file.parsed, episodes) == Some(false))
+        .count()
+}
+
+/// Whether `candidate` can be chosen without asking: for a show, every file's episode must be
+/// in its episode list, or the match is wrong.
+fn covers(group: &Group, candidate: &Candidate) -> bool {
+    !has_placements(group)
+        || (candidate.episodes.is_some() && unlisted(&group.files, candidate) == 0)
+}
+
+fn is_confident(group: &Group, ranked: &[(f64, Candidate)], threshold: f64) -> bool {
+    metadata::is_strong(ranked, threshold)
+        && ranked
+            .first()
+            .is_some_and(|(_, candidate)| covers(group, candidate))
+}
+
+/// Fetches the episode lists of the best `lookups` candidates not yet checked, penalises those
+/// lacking the files' episodes, and re-ranks.
 fn with_episode_lists(
     source: &dyn ShowSource,
     files: &[Pending],
     ranked: Vec<(f64, Candidate)>,
+    lookups: usize,
 ) -> Vec<(f64, Candidate)> {
     let mut ranked: Vec<_> = ranked
         .into_iter()
         .enumerate()
         .map(|(position, (distance, mut candidate))| {
-            if position >= DETAIL_LOOKUPS {
+            if position >= lookups || candidate.episodes.is_some() {
                 return (distance, candidate);
             }
             match source.episodes(&candidate.id, None) {
                 Ok(episodes) => {
-                    candidate.episode_count = Some(EpisodeCount::of(&episodes));
                     let penalty = missing_episode_penalty(files, &episodes);
+                    candidate.episodes = Some(episodes);
                     ((distance + penalty).min(1.0), candidate)
                 }
                 Err(err) => {
@@ -433,8 +465,9 @@ fn with_episode_lists(
     ranked
 }
 
-/// Ranks candidates by name and year, then by running time or episode list when that is
-/// uncertain.
+/// Ranks candidates by name and year, then by running time when that is uncertain. A show's
+/// best candidate always has its episode list checked, and the next few too when uncertain or
+/// when the best lacks the files' episodes.
 fn rank_thoroughly(
     group: &Group,
     lookup: &Lookup,
@@ -449,15 +482,25 @@ fn rank_thoroughly(
     }
     if let Lookup::Show(source) = lookup
         && has_placements(group)
-        && check(&ranked)
     {
-        ranked = with_episode_lists(*source, &group.files, ranked);
+        let uncertain = check(&ranked);
+        let lookups = if uncertain { DETAIL_LOOKUPS } else { 1 };
+        ranked = with_episode_lists(*source, &group.files, ranked, lookups);
+        if !uncertain && !ranked.first().is_some_and(|(_, best)| covers(group, best)) {
+            ranked = with_episode_lists(*source, &group.files, ranked, DETAIL_LOOKUPS);
+        }
     }
     ranked
 }
 
 /// Prints one candidate as `<label> Title (year) [source-id] (match%, runtime)` and its details.
-fn print_candidate(label: &str, candidate: &Candidate, distance: f64, in_library: i64) {
+fn print_candidate(
+    label: &str,
+    candidate: &Candidate,
+    files: &[Pending],
+    distance: f64,
+    in_library: i64,
+) {
     let known = match in_library {
         0 => String::new(),
         count => format!(" - already in library ({count} file(s))"),
@@ -465,9 +508,15 @@ fn print_candidate(label: &str, candidate: &Candidate, distance: f64, in_library
     let runtime = candidate.runtime.map_or(String::new(), |minutes| {
         format!(", {}", human_duration(f64::from(minutes) * 60.0))
     });
-    let episodes = candidate
-        .episode_count
-        .map_or(String::new(), |count| format!(", {count}"));
+    let episodes = candidate.episodes.as_deref().map_or(String::new(), |list| {
+        match unlisted(files, candidate) {
+            0 => format!(", {}", EpisodeCount::of(list)),
+            missing => format!(
+                ", {}, lacks {missing} file(s)' episodes",
+                EpisodeCount::of(list)
+            ),
+        }
+    });
     println!(
         "  {label} {} [{}-{}] ({}{runtime}{episodes}){known}",
         describe_candidate(candidate),
@@ -502,8 +551,23 @@ fn decide(
     if let Some((source, id)) = &group.id_hint
         && source == lookup.source()
     {
-        match lookup.by_id(id) {
+        let found = lookup.by_id(id).map(|candidate| match lookup {
+            Lookup::Show(source) if has_placements(group) => {
+                with_episode_lists(*source, &group.files, vec![(0.0, candidate)], 1)
+                    .remove(0)
+                    .1
+            }
+            _ => candidate,
+        });
+        match found {
             Ok(candidate) if timid => named_by_id = Some(candidate),
+            Ok(candidate) if !covers(group, &candidate) => {
+                println!(
+                    "  {source}-{id} lacks the episodes of {} file(s).",
+                    unlisted(&group.files, &candidate)
+                );
+                named_by_id = Some(candidate);
+            }
             Ok(candidate) => {
                 println!(
                     "  Matched by ID: {} [{source}-{id}]",
@@ -530,7 +594,7 @@ fn decide(
             ranked.retain(|(_, found)| (found.source, &found.id) != (named.source, &named.id));
             ranked.insert(0, (0.0, named));
         }
-        if !timid && !searched_manually && metadata::is_strong(&ranked, threshold) {
+        if !timid && !searched_manually && is_confident(group, &ranked, threshold) {
             let (distance, candidate) = ranked.into_iter().next().unwrap();
             println!(
                 "  Matched: {} [{}-{}] ({})",
@@ -559,7 +623,13 @@ fn decide(
             })
             .collect::<Result<Vec<_>>>()?;
         for (number, ((distance, candidate), count)) in shown.iter().zip(&in_library).enumerate() {
-            print_candidate(&format!("{}.", number + 1), candidate, *distance, *count);
+            print_candidate(
+                &format!("{}.", number + 1),
+                candidate,
+                &group.files,
+                *distance,
+                *count,
+            );
         }
         loop {
             let default = if shown.is_empty() {
@@ -632,8 +702,8 @@ fn decide(
                     let (distance, candidate) = &ranked[0];
                     let count =
                         library.count_identified(group.kind, candidate.source, &candidate.id)?;
-                    print_candidate("Found:", candidate, *distance, count);
-                    if !timid && metadata::is_strong(&ranked, threshold) {
+                    print_candidate("Found:", candidate, &group.files, *distance, count);
+                    if !timid && is_confident(group, &ranked, threshold) {
                         return Ok(Decision::Use(ranked.into_iter().next().unwrap().1));
                     }
                     let Some(answer) = prompt("  Use this match? [Y/n] ")? else {
@@ -705,23 +775,23 @@ fn apply_episode(item: &mut Item, parsed: &Parsed, episodes: &[EpisodeInfo]) -> 
     let last = parsed.episode_end.unwrap_or(first);
     let mut titles: Vec<&str> = Vec::new();
     for number in first..=last {
-        match episodes
+        let Some(found) = episodes
             .iter()
             .find(|e| e.season == season && e.number == number)
+        else {
+            eprintln!(
+                "  warning: s{season:02}e{number:02} is not in the show's episode list; skipping {}",
+                item.path.display()
+            );
+            return false;
+        };
+        if let Some(title) = found.title.as_deref()
+            && !titles.contains(&title)
         {
-            Some(found) => {
-                if let Some(title) = found.title.as_deref()
-                    && !titles.contains(&title)
-                {
-                    titles.push(title);
-                }
-                if number == first {
-                    item.air_date = found.air_date.clone();
-                }
-            }
-            None => eprintln!(
-                "  warning: s{season:02}e{number:02} is not in the metadata; importing without a title"
-            ),
+            titles.push(title);
+        }
+        if number == first {
+            item.air_date = found.air_date.clone();
         }
     }
     item.episode_title = Some(titles.join(" & ")).filter(|t| !t.is_empty());
@@ -1027,7 +1097,7 @@ fn run_with(
             (config.import.timid || options.timid) && !options.no_timid,
             &mut edition,
         )?;
-        let candidate = match decision {
+        let mut candidate = match decision {
             Decision::Use(candidate) => candidate,
             Decision::Skip => {
                 importer.summary.skipped += group.files.len();
@@ -1037,7 +1107,10 @@ fn run_with(
         };
 
         let episodes = match lookup {
-            Lookup::Show(source) => fetch_episodes(source, &candidate.id, &group.files),
+            Lookup::Show(source) => match candidate.episodes.take() {
+                Some(episodes) => episodes,
+                None => fetch_episodes(source, &candidate.id, &group.files),
+            },
             Lookup::Movie(_) => Vec::new(),
         };
         for (index, file) in group.files.iter().enumerate() {
@@ -1180,7 +1253,7 @@ mod tests {
             original_title: None,
             overview: None,
             runtime: None,
-            episode_count: None,
+            episodes: None,
         }
     }
 
@@ -1556,8 +1629,8 @@ mod tests {
             ])
         }
 
-        fn show(&self, _: &str) -> Result<Candidate> {
-            Err(anyhow!("unused"))
+        fn show(&self, id: &str) -> Result<Candidate> {
+            Ok(candidate("Archer", 2009, id))
         }
 
         fn episodes(&self, id: &str, season: Option<u32>) -> Result<Vec<EpisodeInfo>> {
@@ -1607,14 +1680,50 @@ mod tests {
             panic!("expected a confident match");
         };
         assert_eq!(chosen.id, "long");
-        assert_eq!(
-            chosen.episode_count,
-            Some(EpisodeCount {
-                episodes: 52,
-                specials: 0
-            })
-        );
+        assert_eq!(chosen.episodes.as_ref().map(Vec::len), Some(52));
         assert_eq!(*source.listed.borrow(), ["mini", "long"]);
+    }
+
+    fn quiet_decision(group: &Group, source: &dyn ShowSource) -> Decision {
+        decide(
+            group,
+            &Lookup::Show(source),
+            &Library::in_memory().unwrap(),
+            0.08,
+            false,
+            false,
+            &mut None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_show_lacking_any_files_episode_is_not_matched_without_asking() {
+        let source = NamesakeShows::default();
+        let covered = show_group(&["/in/Archer.2009.S01E01.mkv", "/in/Archer.2009.S04E13.mkv"]);
+        assert!(matches!(
+            quiet_decision(&covered, &source),
+            Decision::Use(chosen) if chosen.id == "long"
+        ));
+
+        let beyond = show_group(&["/in/Archer.2009.S01E01.mkv", "/in/Archer.2009.S05E01.mkv"]);
+        assert!(matches!(quiet_decision(&beyond, &source), Decision::Skip));
+    }
+
+    #[test]
+    fn an_id_tag_is_not_trusted_when_the_show_lacks_the_files_episodes() {
+        let source = NamesakeShows::default();
+        let tagged = show_group(&["/in/Archer {tvdb-long}/Archer.S01E01.mkv"]);
+        assert!(matches!(
+            quiet_decision(&tagged, &source),
+            Decision::Use(chosen) if chosen.id == "long"
+        ));
+
+        let mistagged = show_group(&["/in/Archer {tvdb-mini}/Archer.S04E01.mkv"]);
+        assert!(matches!(
+            quiet_decision(&mistagged, &source),
+            Decision::Skip
+        ));
     }
 
     #[test]
@@ -1645,10 +1754,12 @@ mod tests {
     }
 
     #[test]
-    fn unlisted_episodes_are_imported_without_a_title() {
-        let item = applied("Show S05E09 Parsed Title", &episodes()).unwrap();
-        assert_eq!(item.episode_title, None);
-        assert_eq!(item.episode_code().as_deref(), Some("s05e09"));
+    fn unlisted_episodes_are_skipped() {
+        assert!(applied("Show S05E09 Parsed Title", &episodes()).is_none());
+        assert!(
+            applied("Show S01E02-E03", &episodes()).is_none(),
+            "every episode a file spans must be listed"
+        );
     }
 
     #[test]
@@ -1732,7 +1843,7 @@ mod tests {
                         original_title: None,
                         overview: None,
                         runtime: None,
-                        episode_count: None,
+                        episodes: None,
                     };
                     known.push(work.clone());
                     work
@@ -2107,6 +2218,12 @@ mod tests {
         let mut env = Env::new();
         let film = env.write("Movies/messy/Heat.1995.mkv", "video");
         let episode = env.write("TV/Show/Show.S01E01.mkv", "video");
+        env.sources.episodes = vec![EpisodeInfo {
+            season: 1,
+            number: 1,
+            title: None,
+            air_date: None,
+        }];
         env.rescan(&[], false).unwrap();
 
         let mut expected = vec![film.clone(), episode.clone()];
