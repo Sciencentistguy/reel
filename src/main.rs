@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod check;
 mod commands;
 mod config;
 mod fileops;
@@ -71,6 +72,8 @@ enum Command {
     Missing(missing::Options),
     /// List video files in the library folders that are not in the database.
     Unmatched,
+    /// List episode files whose running time doesn't fit the episode they are matched to.
+    Check(check::Options),
     /// Re-probe changed files and drop entries whose files have gone.
     Update {
         #[arg(short = 'n', long, visible_alias = "dry-run")]
@@ -155,6 +158,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Sync(options) => sync::run(&config, &mut open_library()?, &options),
         Command::Missing(options) => missing::run(&config, &open_library()?, &options),
         Command::Unmatched => unmatched::run(&config, &open_library()?),
+        Command::Check(options) => check::run(&config, &open_library()?, &options),
         Command::Update {
             pretend,
             force,
@@ -307,6 +311,7 @@ mod tests {
         assert!(parse(&["list"]).is_ok());
         assert!(parse(&["stats"]).is_ok());
         assert!(parse(&["rescan"]).is_ok());
+        assert!(parse(&["check", "title:coroner"]).is_ok());
         assert!(parse(&["sync", "-nM", "kind:episode"]).is_ok());
         assert!(parse(&["missing", "--specials", "title:lost"]).is_ok());
     }

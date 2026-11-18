@@ -122,17 +122,25 @@ fn works(items: Vec<Item>) -> BTreeMap<(Kind, String, String), Vec<Item>> {
 
 fn fetch_show(source: &dyn ShowSource, id: &str, items: &[Item]) -> Result<Record> {
     let work = source.show(id)?;
-    let episodes = if items.iter().any(|item| item.date_based) {
-        source.episodes(id, None)?
-    } else {
-        let seasons: BTreeSet<u32> = items.iter().filter_map(|item| item.season).collect();
-        let mut episodes = Vec::new();
-        for season in seasons {
-            episodes.extend(source.episodes(id, Some(season))?);
-        }
-        episodes
-    };
+    let episodes = fetch_episodes(source, id, items)?;
     Ok(Record { work, episodes })
+}
+
+/// The source's episodes in the seasons `items` are numbered in, or all of them for a daily show.
+pub fn fetch_episodes(
+    source: &dyn ShowSource,
+    id: &str,
+    items: &[Item],
+) -> Result<Vec<EpisodeInfo>> {
+    if items.iter().any(|item| item.date_based) {
+        return source.episodes(id, None);
+    }
+    let seasons: BTreeSet<u32> = items.iter().filter_map(|item| item.season).collect();
+    let mut episodes = Vec::new();
+    for season in seasons {
+        episodes.extend(source.episodes(id, Some(season))?);
+    }
+    Ok(episodes)
 }
 
 /// Brings an item's metadata in line with what its source now says, or explains why the source's
@@ -159,36 +167,18 @@ fn apply_episode(
             Ok(())
         }
     };
-    if item.date_based {
-        let Some(found) = episodes
-            .iter()
-            .find(|episode| episode.air_date.is_some() && episode.air_date == item.air_date)
-        else {
-            return Ok(());
-        };
-        fits(item, &[found])?;
-        item.season = Some(found.season);
-        item.episode = Some(found.number);
-        item.episode_title = found.title.clone().or(item.episode_title.take());
-        return Ok(());
-    }
-
-    let (Some(season), Some(first)) = (item.season, item.episode) else {
-        return Ok(());
-    };
-    let last = item.episode_end.unwrap_or(first);
-    let found: Vec<&EpisodeInfo> = (first..=last)
-        .filter_map(|number| {
-            episodes
-                .iter()
-                .find(|episode| episode.season == season && episode.number == number)
-        })
-        .collect();
+    let (found, complete) = listed_episodes(item, episodes);
     let Some(opening) = found.first() else {
         return Ok(());
     };
-    if found.len() == (first..=last).count() {
+    if complete {
         fits(item, &found)?;
+    }
+    if item.date_based {
+        item.season = Some(opening.season);
+        item.episode = Some(opening.number);
+        item.episode_title = opening.title.clone().or(item.episode_title.take());
+        return Ok(());
     }
     let mut titles: Vec<&str> = Vec::new();
     for title in found.iter().filter_map(|episode| episode.title.as_deref()) {
@@ -205,8 +195,36 @@ fn apply_episode(
     Ok(())
 }
 
+/// The source's episodes an item's file holds, found by air date for a daily show or by number,
+/// and whether the source lists every one of them.
+pub fn listed_episodes<'a>(
+    item: &Item,
+    episodes: &'a [EpisodeInfo],
+) -> (Vec<&'a EpisodeInfo>, bool) {
+    if item.date_based {
+        let found = episodes
+            .iter()
+            .find(|episode| episode.air_date.is_some() && episode.air_date == item.air_date);
+        return (found.into_iter().collect(), found.is_some());
+    }
+    let (Some(season), Some(first)) = (item.season, item.episode) else {
+        return (Vec::new(), false);
+    };
+    let numbers = first..=item.episode_end.unwrap_or(first);
+    let wanted = numbers.clone().count();
+    let found: Vec<_> = numbers
+        .filter_map(|number| {
+            episodes
+                .iter()
+                .find(|episode| episode.season == season && episode.number == number)
+        })
+        .collect();
+    let complete = !found.is_empty() && found.len() == wanted;
+    (found, complete)
+}
+
 /// Fails when the item's file runs too long or short to be `episodes`.
-fn check_length(item: &Item, episodes: &[&EpisodeInfo]) -> Result<(), String> {
+pub fn check_length(item: &Item, episodes: &[&EpisodeInfo]) -> Result<(), String> {
     if metadata::episodes_fit(item.media.duration, episodes) {
         return Ok(());
     }

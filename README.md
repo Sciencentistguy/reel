@@ -99,6 +99,7 @@ module writes the system-wide `/etc/reel/config.toml`.
 | `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
 | `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
 | `reel unmatched` | List video files in the library folders that are not in the database |
+| `reel check [QUERY]` | List episode files whose running time doesn't fit the episode they are matched to |
 | `reel update [QUERY]` | Re-probe changed files, drop entries whose files have gone |
 | `reel remove QUERY` | Remove items from the library (`-d` also deletes the files) |
 | `reel purge [QUERY]` | Remove items lacking a source, year, or episode numbering (`-d` also deletes the files) |
@@ -173,6 +174,13 @@ no row for, usually ones an import or rescan couldn't match. They are grouped by
 folder they sit in, labelled with what the library has there (or `nothing in the library`), with
 loose files in a root listed separately. `reel rescan` tries to match them again.
 
+`reel check` applies the import's length check to episodes already in the library, without
+changing anything: each matching file's running time is compared with the runtime its source now
+gives the episode it is matched to, and the misfits are listed by show. A misfit usually means the
+files are numbered one off from the source, from a duplicate or an extra filed as an episode, so
+the files around it are often wrong too. Files numbered as episodes the source doesn't list, and
+files never probed, are counted rather than checked.
+
 `reel purge` removes items whose metadata is incomplete: anything not matched to a source, films
 without a year, and episodes without a season and episode number (or, for daily shows, an air
 date). Missing episode titles don't count, since sources often fill them in later and `reel sync`
@@ -232,6 +240,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | `sync` | Refreshing identified items from their metadata source |
 | `missing` | Listing episodes of shows that have no file |
 | `unmatched` | Listing library files that are not in the database |
+| `check` | Listing episode files too long or short for their match |
 
 ## Potential future work
 

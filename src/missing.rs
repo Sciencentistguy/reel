@@ -61,7 +61,7 @@ pub fn run(config: &Config, library: &Library, options: &Options) -> Result<()> 
 }
 
 /// Groups episode files by the show they were matched to.
-fn shows(items: Vec<Item>) -> BTreeMap<(String, String), Vec<Item>> {
+pub fn shows(items: Vec<Item>) -> BTreeMap<(String, String), Vec<Item>> {
     let mut shows: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for item in items.into_iter().filter(|item| item.kind == Kind::Episode) {
         if let (Some(source), Some(id)) = (item.source.clone(), item.source_id.clone()) {
