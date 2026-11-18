@@ -1,11 +1,15 @@
 //! Media information via `ffprobe`.
 
+use std::collections::HashMap;
 use std::num::NonZero;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -121,24 +125,69 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
     Ok(info)
 }
 
-/// Probes several files at once, since each probe mostly waits on ffprobe starting up and on disk
-/// reads. Results are in the same order as `paths`.
-pub fn probe_all(paths: &[&Path]) -> Vec<Result<MediaInfo>> {
-    const MAX_WORKERS: usize = 8;
-    let workers = thread::available_parallelism()
-        .map_or(1, NonZero::get)
-        .min(MAX_WORKERS);
-    let chunk = paths.len().div_ceil(workers).max(1);
-    thread::scope(|scope| {
-        let handles: Vec<_> = paths
-            .chunks(chunk)
-            .map(|chunk| scope.spawn(|| chunk.iter().map(|path| probe(path)).collect::<Vec<_>>()))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("probe thread panicked"))
-            .collect()
-    })
+/// Probes several files on background threads, since each probe mostly waits on ffprobe starting
+/// up and on disk reads. Files are probed roughly in order so the earliest are ready first, and
+/// dropping this stops any probes that have not yet started.
+pub struct Background {
+    results: Receiver<(usize, Result<MediaInfo>)>,
+    ready: HashMap<usize, Result<MediaInfo>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Background {
+    pub fn start(paths: Vec<PathBuf>) -> Self {
+        const MAX_WORKERS: usize = 8;
+        let workers = thread::available_parallelism()
+            .map_or(1, NonZero::get)
+            .min(MAX_WORKERS)
+            .min(paths.len());
+        let paths = Arc::new(paths);
+        let next = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, results) = mpsc::channel();
+        for _ in 0..workers {
+            let (paths, next, cancelled, sender) = (
+                paths.clone(),
+                next.clone(),
+                cancelled.clone(),
+                sender.clone(),
+            );
+            thread::spawn(move || {
+                while !cancelled.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = paths.get(index) else { break };
+                    if sender.send((index, probe(path))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Background {
+            results,
+            ready: HashMap::new(),
+            cancelled,
+        }
+    }
+
+    /// Waits for the probe of the `index`th path.
+    pub fn get(&mut self, index: usize) -> Result<MediaInfo> {
+        loop {
+            if let Some(result) = self.ready.remove(&index) {
+                return result;
+            }
+            let (done, result) = self
+                .results
+                .recv()
+                .map_err(|_| anyhow!("probing stopped before reaching file {index}"))?;
+            self.ready.insert(done, result);
+        }
+    }
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }
 
 fn side_data<'a>(list: &'a [Value], kind: &str) -> Option<&'a Value> {

@@ -745,34 +745,26 @@ struct Importer<'a> {
 }
 
 impl Importer<'_> {
-    /// Probes all of `files` in parallel, giving `None` for each file that cannot be probed.
-    fn probe(&mut self, files: &[Pending]) -> Vec<Option<MediaInfo>> {
-        if !self.probe {
-            return vec![None; files.len()];
-        }
-        let paths: Vec<&Path> = files.iter().map(|file| file.path.as_path()).collect();
-        let results = probe::probe_all(&paths);
-        let mut ffprobe_missing = false;
-        let media = results
-            .into_iter()
-            .map(|result| {
-                result
-                    .inspect_err(|err| {
-                        if err.downcast_ref::<io::Error>().is_some() {
-                            ffprobe_missing = true;
-                        } else {
-                            eprintln!("  warning: {err:#}");
-                        }
-                    })
-                    .ok()
-            })
-            .collect();
-        if ffprobe_missing {
-            eprintln!("  warning: cannot run ffprobe (is ffmpeg installed?)");
+    /// Starts probing `files` in the background, unless probing is off.
+    fn start_probing(&self, files: &[Pending]) -> Option<probe::Background> {
+        self.probe
+            .then(|| probe::Background::start(files.iter().map(|file| file.path.clone()).collect()))
+    }
+
+    /// The `index`th file's media information, or `None` when it cannot be probed. Stops probing
+    /// altogether when ffprobe cannot be run.
+    fn media(&mut self, probes: &mut Option<probe::Background>, index: usize) -> Option<MediaInfo> {
+        let err = match probes.as_mut()?.get(index) {
+            Ok(media) => return Some(media),
+            Err(err) => err,
+        };
+        eprintln!("  warning: {err:#}");
+        if err.downcast_ref::<io::Error>().is_some() {
             eprintln!("  warning: continuing without media information");
             self.probe = false;
+            *probes = None;
         }
-        media
+        None
     }
 
     /// Returns whether the file was imported (as opposed to skipped).
@@ -962,6 +954,8 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
             describe(&group.title, group.year),
             group.files.len()
         );
+        // Probing overlaps with the metadata lookup and any prompt.
+        let mut probes = importer.start_probing(&group.files);
 
         if can_measure {
             match measure(&group) {
@@ -1014,8 +1008,7 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
             }
             _ => None,
         };
-        let media = importer.probe(&group.files);
-        for (file, media) in group.files.iter().zip(media) {
+        for (index, file) in group.files.iter().enumerate() {
             let mut item = base_item(&group, file, candidate.as_ref());
             match group.kind {
                 Kind::Movie => {
@@ -1031,6 +1024,7 @@ fn run_with(config: &Config, library: &mut Library, options: &Options, adopt: bo
                     }
                 }
             }
+            let media = importer.media(&mut probes, index);
             match importer.import(item, file, media) {
                 Ok(true) => importer.summary.imported += 1,
                 Ok(false) => importer.summary.skipped += 1,
