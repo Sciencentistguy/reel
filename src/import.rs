@@ -326,13 +326,18 @@ fn hyperlink(text: &str, url: &str) -> String {
 }
 
 /// Whether output may be coloured: it is a terminal, and `NO_COLOR` isn't set.
-fn use_colour() -> bool {
+pub fn use_colour() -> bool {
     io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// `text` in the SGR style `code` (such as `"33"` for yellow), when output may be coloured.
 pub fn paint(code: &str, text: &str) -> String {
-    if use_colour() {
+    style(code, text, use_colour())
+}
+
+/// `text` in the SGR style `code` when `colour` is set, and unchanged otherwise.
+pub fn style(code: &str, text: &str, colour: bool) -> String {
+    if colour {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
         text.to_string()

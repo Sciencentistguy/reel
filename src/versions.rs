@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::commands::{describe_audio, describe_subtitle, human_duration, human_size};
-use crate::import::paint;
+use crate::import::{style, use_colour};
 use crate::model::Item;
 
 /// Decides what to do with a new file (an item, and where it is) given the library's other
@@ -36,7 +36,7 @@ pub fn ask(
     prompt: impl Fn(&str) -> Result<Option<String>>,
 ) -> Result<Choice> {
     println!("  The library already has this:");
-    print!("{}", table(new, path, existing, textwrap::termwidth()));
+    print!("{}", table(new, path, existing, textwrap::termwidth(), use_colour()));
     if remuxed {
         println!("  The new file's tracks are as remuxing will leave them; its size and bitrate are the source's.");
     }
@@ -70,8 +70,8 @@ fn parse(answer: &str, existing: usize) -> Option<Choice> {
 }
 
 /// Each file's details side by side, one column per file, fitted to `width` columns. Rows on
-/// which every file agrees are dimmed, so the differences stand out.
-fn table(new: &Item, path: &Path, existing: &[Item], width: usize) -> String {
+/// which every file agrees are dimmed when `colour` is set, so the differences stand out.
+fn table(new: &Item, path: &Path, existing: &[Item], width: usize, colour: bool) -> String {
     let mut headings = vec!["new".to_string()];
     headings.extend((1..=existing.len()).map(|n| match existing.len() {
         1 => "library".to_string(),
@@ -115,7 +115,7 @@ fn table(new: &Item, path: &Path, existing: &[Item], width: usize) -> String {
         text.truncate(text.trim_end().len());
         text
     };
-    out.push_str(&paint("1", &line("", headings.iter().map(String::as_str).collect())));
+    out.push_str(&style("1", &line("", headings.iter().map(String::as_str).collect()), colour));
     out.push('\n');
     for (label, cells) in &rows {
         let agreed = *label != "file" && cells.windows(2).all(|pair| pair[0] == pair[1]);
@@ -130,7 +130,7 @@ fn table(new: &Item, path: &Path, existing: &[Item], width: usize) -> String {
                 })
                 .collect();
             let text = line(if index == 0 { label } else { "" }, parts);
-            out.push_str(&if agreed { paint("2", &text) } else { text });
+            out.push_str(&if agreed { style("2", &text, colour) } else { text });
             out.push('\n');
         }
     }
@@ -253,7 +253,7 @@ mod tests {
     fn the_table_shows_each_file_side_by_side() {
         let new = film("/in/heat.mkv", 50_000_000_000, "hevc", Some("DV, HDR10"));
         let old = film("/lib/Heat (1995).mkv", 25_000_000_000, "h264", None);
-        let table = table(&new, &new.path, &[old], 100);
+        let table = table(&new, &new.path, &[old], 100, false);
         let lines: Vec<&str> = table.lines().collect();
         assert_eq!(lines[0].split_whitespace().collect::<Vec<_>>(), ["new", "library"]);
         let row = |label: &str| {
@@ -273,7 +273,7 @@ mod tests {
     fn cells_are_cut_to_fit_the_width() {
         let new = film("/in/a-very-long-release-name-that-goes-on-and-on.mkv", 1, "hevc", None);
         let old = film("/lib/another-very-long-library-file-name-indeed.mkv", 2, "hevc", None);
-        let table = table(&new, &new.path, &[old], 60);
+        let table = table(&new, &new.path, &[old], 60, false);
         assert!(table.lines().all(|line| line.chars().count() <= 60), "{table}");
         assert!(table.contains('…'));
     }
