@@ -1083,7 +1083,12 @@ impl Importer<'_> {
         None
     }
 
-    fn import(&mut self, mut item: Item, file: &Pending, media: Option<MediaInfo>) -> Result<Outcome> {
+    fn import(
+        &mut self,
+        mut item: Item,
+        file: &Pending,
+        media: Option<MediaInfo>,
+    ) -> Result<Outcome> {
         if let Some(media) = media {
             item.media = media;
         }
@@ -1247,7 +1252,9 @@ impl Importer<'_> {
     /// Removes `old` from the library and deletes its files, all but `kept`, which the new file
     /// is about to take over.
     fn retire(&mut self, old: &Item, kept: &Path) -> Result<()> {
-        let sidecars = naming::sidecars(&old.path).into_iter().map(|(path, _)| path);
+        let sidecars = naming::sidecars(&old.path)
+            .into_iter()
+            .map(|(path, _)| path);
         let video = (old.path != kept).then(|| old.path.clone());
         for path in sidecars.chain(video) {
             if let Err(err) = fs::remove_file(&path)
@@ -1396,7 +1403,14 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
         versions::ask(new, path, existing, remuxed, prompt)
     };
     let interactive = !options.quiet && io::stdin().is_terminal();
-    run_with(config, library, options, false, &mut sources, interactive.then_some(&ask))
+    run_with(
+        config,
+        library,
+        options,
+        false,
+        &mut sources,
+        interactive.then_some(&ask),
+    )
 }
 
 /// Adds files that are in the library folders but missing from the database, leaving them where
@@ -2539,7 +2553,11 @@ mod tests {
         }
 
         /// As `import_choosing`, also returning whether each question showed a remux.
-        fn import_asked(&mut self, options: &Options, choice: Choice) -> Result<Vec<(usize, bool)>> {
+        fn import_asked(
+            &mut self,
+            options: &Options,
+            choice: Choice,
+        ) -> Result<Vec<(usize, bool)>> {
             let shown = std::cell::RefCell::new(Vec::new());
             let resolve = |_: &Item, _: &Path, existing: &[Item], remuxed: bool| {
                 shown.borrow_mut().push((existing.len(), remuxed));
@@ -2746,7 +2764,8 @@ mod tests {
         env.write("old/Heat.1995.1080p.en.srt", "old subs");
         env.import(&options(env, &["old"])).unwrap();
         env.write("new/Heat.1995.2160p.mkv", "new, bigger video");
-        env.import_choosing(&options(env, &["new"]), choice).unwrap()
+        env.import_choosing(&options(env, &["new"]), choice)
+            .unwrap()
     }
 
     const HEAT: &str = "Movies/Heat (1995) {tmdb-1}/Heat (1995) {tmdb-1}.mkv";
@@ -2757,15 +2776,26 @@ mod tests {
         assert_eq!(offer_a_second_heat(&mut env, Choice::Replace(0)), [1]);
         let rows = env.rows();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, env.path(HEAT), "no version suffix is needed any more");
+        assert_eq!(
+            rows[0].path,
+            env.path(HEAT),
+            "no version suffix is needed any more"
+        );
         assert_eq!(rows[0].media.resolution.as_deref(), Some("2160p"));
-        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "new, bigger video");
+        assert_eq!(
+            std::fs::read_to_string(env.path(HEAT)).unwrap(),
+            "new, bigger video"
+        );
         let folder = env.path(HEAT).parent().unwrap().to_owned();
         let left: Vec<_> = std::fs::read_dir(&folder)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(left, [std::ffi::OsString::from("Heat (1995) {tmdb-1}.mkv")], "the old sidecar goes too");
+        assert_eq!(
+            left,
+            [std::ffi::OsString::from("Heat (1995) {tmdb-1}.mkv")],
+            "the old sidecar goes too"
+        );
     }
 
     #[test]
@@ -2782,7 +2812,10 @@ mod tests {
         let mut env = Env::new();
         offer_a_second_heat(&mut env, Choice::KeepBoth);
         assert_eq!(env.rows().len(), 2);
-        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "old video");
+        assert_eq!(
+            std::fs::read_to_string(env.path(HEAT)).unwrap(),
+            "old video"
+        );
     }
 
     #[test]
@@ -2809,7 +2842,9 @@ mod tests {
         env.write("old/Heat.1995.1080p.mkv", "video");
         env.import(&options(&env, &["old"])).unwrap();
         env.write("new/Heat.1995.1080p.mkv", "video");
-        let shown = env.import_choosing(&options(&env, &["new"]), Choice::KeepBoth).unwrap();
+        let shown = env
+            .import_choosing(&options(&env, &["new"]), Choice::KeepBoth)
+            .unwrap();
         assert!(shown.is_empty());
         assert_eq!(env.rows().len(), 1);
     }
@@ -2822,11 +2857,15 @@ mod tests {
         env.import(&options(&env, &["old"])).unwrap();
         fake_videoconverter(&mut env, "echo remuxed > \"$out\"");
         env.write("new/Heat.1995.2160p.mp4", "new video");
-        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0)).unwrap();
+        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0))
+            .unwrap();
         let rows = env.rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].path, env.path(HEAT));
-        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "remuxed\n");
+        assert_eq!(
+            std::fs::read_to_string(env.path(HEAT)).unwrap(),
+            "remuxed\n"
+        );
     }
 
     #[cfg(unix)]
@@ -2837,7 +2876,9 @@ mod tests {
         env.import(&options(&env, &["old"])).unwrap();
         fake_videoconverter(&mut env, "touch \"$out\"");
         env.write("new/Heat.1995.2160p.mp4", "new video");
-        let asked = env.import_asked(&options(&env, &["new"]), Choice::Skip).unwrap();
+        let asked = env
+            .import_asked(&options(&env, &["new"]), Choice::Skip)
+            .unwrap();
         assert_eq!(asked, [(1, true)]);
     }
 
@@ -2849,9 +2890,13 @@ mod tests {
         env.import(&options(&env, &["old"])).unwrap();
         fake_videoconverter(&mut env, "exit 1");
         env.write("new/Heat.1995.2160p.mp4", "new video");
-        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0)).unwrap();
+        env.import_choosing(&options(&env, &["new"]), Choice::Replace(0))
+            .unwrap();
         assert_eq!(env.rows().len(), 1);
-        assert_eq!(std::fs::read_to_string(env.path(HEAT)).unwrap(), "old video");
+        assert_eq!(
+            std::fs::read_to_string(env.path(HEAT)).unwrap(),
+            "old video"
+        );
     }
 
     #[test]

@@ -434,7 +434,11 @@ impl Library {
     fn same_work_exists(&self, item: &Item, same_file: bool) -> Result<bool> {
         let size = item.size as i64;
         let mut values = same_work_params(item).to_vec();
-        values.extend([&same_file as &dyn rusqlite::ToSql, &size, &item.media.resolution]);
+        values.extend([
+            &same_file as &dyn rusqlite::ToSql,
+            &size,
+            &item.media.resolution,
+        ]);
         Ok(self.conn.query_row(
             &format!(
                 "SELECT EXISTS (SELECT 1 FROM items WHERE {SAME_WORK} \

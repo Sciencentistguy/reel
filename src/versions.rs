@@ -36,9 +36,14 @@ pub fn ask(
     prompt: impl Fn(&str) -> Result<Option<String>>,
 ) -> Result<Choice> {
     println!("  The library already has this:");
-    print!("{}", table(new, path, existing, textwrap::termwidth(), use_colour()));
+    print!(
+        "{}",
+        table(new, path, existing, textwrap::termwidth(), use_colour())
+    );
     if remuxed {
-        println!("  The new file's tracks are as remuxing will leave them; its size and bitrate are the source's.");
+        println!(
+            "  The new file's tracks are as remuxing will leave them; its size and bitrate are the source's."
+        );
     }
     let which = match existing.len() {
         1 => String::new(),
@@ -115,7 +120,11 @@ fn table(new: &Item, path: &Path, existing: &[Item], width: usize, colour: bool)
         text.truncate(text.trim_end().len());
         text
     };
-    out.push_str(&style("1", &line("", headings.iter().map(String::as_str).collect()), colour));
+    out.push_str(&style(
+        "1",
+        &line("", headings.iter().map(String::as_str).collect()),
+        colour,
+    ));
     out.push('\n');
     for (label, cells) in &rows {
         let agreed = *label != "file" && cells.windows(2).all(|pair| pair[0] == pair[1]);
@@ -130,7 +139,11 @@ fn table(new: &Item, path: &Path, existing: &[Item], width: usize, colour: bool)
                 })
                 .collect();
             let text = line(if index == 0 { label } else { "" }, parts);
-            out.push_str(&if agreed { style("2", &text, colour) } else { text });
+            out.push_str(&if agreed {
+                style("2", &text, colour)
+            } else {
+                text
+            });
             out.push('\n');
         }
     }
@@ -144,18 +157,30 @@ type Cell = fn(&Item, &Path) -> Vec<String>;
 
 const ROWS: &[(&str, Cell)] = &[
     ("file", |_, path| {
-        vec![path.file_name().unwrap_or_default().to_string_lossy().into_owned()]
+        vec![
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        ]
     }),
     ("size", |item, _| vec![human_size(item.size)]),
     ("duration", |item, _| {
-        item.media.duration.map(human_duration).into_iter().collect()
+        item.media
+            .duration
+            .map(human_duration)
+            .into_iter()
+            .collect()
     }),
     ("bitrate", |item, _| bitrate(item).into_iter().collect()),
     ("video", |item, _| {
         let media = &item.media;
         let parts = [
             media.video_codec.clone(),
-            media.width.zip(media.height).map(|(w, h)| format!("{w}x{h}")),
+            media
+                .width
+                .zip(media.height)
+                .map(|(w, h)| format!("{w}x{h}")),
             media.bit_depth.map(|bits| format!("{bits}-bit")),
         ];
         joined(parts)
@@ -184,7 +209,9 @@ const ROWS: &[(&str, Cell)] = &[
     ("subtitles", |item, _| {
         listed(item.media.subtitles.iter().map(describe_subtitle).collect())
     }),
-    ("title tag", |item, _| item.media.title.clone().into_iter().collect()),
+    ("title tag", |item, _| {
+        item.media.title.clone().into_iter().collect()
+    }),
 ];
 
 /// The overall bitrate, from the file's size and running time.
@@ -214,7 +241,11 @@ fn listed(mut lines: Vec<String>) -> Vec<String> {
 /// `text` cut to `width` characters, ending in an ellipsis when cut.
 fn fit(text: &str, width: usize) -> String {
     match text.chars().count() > width {
-        true => text.chars().take(width.saturating_sub(1)).chain(['…']).collect(),
+        true => text
+            .chars()
+            .take(width.saturating_sub(1))
+            .chain(['…'])
+            .collect(),
         false => text.to_string(),
     }
 }
@@ -255,7 +286,10 @@ mod tests {
         let old = film("/lib/Heat (1995).mkv", 25_000_000_000, "h264", None);
         let table = table(&new, &new.path, &[old], 100, false);
         let lines: Vec<&str> = table.lines().collect();
-        assert_eq!(lines[0].split_whitespace().collect::<Vec<_>>(), ["new", "library"]);
+        assert_eq!(
+            lines[0].split_whitespace().collect::<Vec<_>>(),
+            ["new", "library"]
+        );
         let row = |label: &str| {
             *lines
                 .iter()
@@ -271,10 +305,23 @@ mod tests {
 
     #[test]
     fn cells_are_cut_to_fit_the_width() {
-        let new = film("/in/a-very-long-release-name-that-goes-on-and-on.mkv", 1, "hevc", None);
-        let old = film("/lib/another-very-long-library-file-name-indeed.mkv", 2, "hevc", None);
+        let new = film(
+            "/in/a-very-long-release-name-that-goes-on-and-on.mkv",
+            1,
+            "hevc",
+            None,
+        );
+        let old = film(
+            "/lib/another-very-long-library-file-name-indeed.mkv",
+            2,
+            "hevc",
+            None,
+        );
         let table = table(&new, &new.path, &[old], 60, false);
-        assert!(table.lines().all(|line| line.chars().count() <= 60), "{table}");
+        assert!(
+            table.lines().all(|line| line.chars().count() <= 60),
+            "{table}"
+        );
         assert!(table.contains('…'));
     }
 

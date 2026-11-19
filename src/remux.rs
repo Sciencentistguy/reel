@@ -81,7 +81,10 @@ fn finish(program: &str, job: &Job, status: &Result<ExitStatus>) -> Result<()> {
             "{program} produced nothing for {}",
             job.source.display()
         )),
-        Ok(status) => Err(anyhow!("{program} failed ({status}) on {}", job.source.display())),
+        Ok(status) => Err(anyhow!(
+            "{program} failed ({status}) on {}",
+            job.source.display()
+        )),
         Err(err) => Err(anyhow!("{err:#}")),
     };
     if result.is_err() {
@@ -279,7 +282,12 @@ pub fn write_script(path: &Path, script: &str) {
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
     assert!(child.wait().unwrap().success());
 }
 
@@ -323,7 +331,10 @@ mod tests {
 
     fn version_script(dir: &Path, output: &str) -> String {
         let path = dir.join("videoconverter");
-        write_script(&path, &format!("#!/bin/sh\necho stty noise >&2\n{output}\n"));
+        write_script(
+            &path,
+            &format!("#!/bin/sh\necho stty noise >&2\n{output}\n"),
+        );
         path.to_string_lossy().into_owned()
     }
 
@@ -341,7 +352,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let program = version_script(dir.path(), "echo videoconverter 0.4.0");
         let err = format!("{:#}", check(&program).unwrap_err());
-        assert!(err.contains("0.5 or later") && err.contains("0.4.0"), "{err}");
+        assert!(
+            err.contains("0.5 or later") && err.contains("0.4.0"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -372,13 +386,12 @@ mod tests {
             "if [ \"$in\" = bad.mp4 ]; then status=1; else echo \"$in\" > \"$out\"; fi",
         );
         let [a, bad, c] = ["a.mkv", "bad.mkv", "c.mkv"].map(|name| dir.path().join(name));
-        let jobs = [("a.mp4", &a), ("bad.mp4", &bad), ("c.mp4", &c)].map(|(source, destination)| {
-            Job {
+        let jobs =
+            [("a.mp4", &a), ("bad.mp4", &bad), ("c.mp4", &c)].map(|(source, destination)| Job {
                 source: Path::new(source),
                 destination,
                 replace: false,
-            }
-        });
+            });
         let outcomes = remux(&program, &[], &jobs);
         assert!(outcomes[0].is_ok() && outcomes[2].is_ok());
         assert!(format!("{:#}", outcomes[1].as_ref().unwrap_err()).contains("bad.mp4"));
@@ -425,7 +438,10 @@ mod tests {
         fs::write(&destination, "original").unwrap();
         assert!(one(&program, &[], &destination).is_err());
         assert_eq!(fs::read_to_string(&destination).unwrap(), "original");
-        assert!(!Path::new(&format!("{program}.args")).exists(), "nothing left to run");
+        assert!(
+            !Path::new(&format!("{program}.args")).exists(),
+            "nothing left to run"
+        );
     }
 
     #[test]
@@ -442,7 +458,10 @@ mod tests {
         let plan = plan(&program, &["--anime".into()], Path::new("in.mkv")).unwrap();
         assert_eq!(plan.audio.len(), 1);
         let args = fs::read_to_string(format!("{program}.args")).unwrap();
-        assert!(args.starts_with("--plan --copy-video --no-external-subs --anime --output "), "{args}");
+        assert!(
+            args.starts_with("--plan --copy-video --no-external-subs --anime --output "),
+            "{args}"
+        );
         assert!(args.ends_with(" -- in.mkv\n"), "{args}");
     }
 
@@ -465,7 +484,11 @@ mod tests {
             ..AudioStream::default()
         };
         let media = MediaInfo {
-            audio: vec![audio(1, "eng", "flac"), audio(2, "jpn", "flac"), audio(3, "eng", "pcm_s24le")],
+            audio: vec![
+                audio(1, "eng", "flac"),
+                audio(2, "jpn", "flac"),
+                audio(3, "eng", "pcm_s24le"),
+            ],
             subtitles: vec![SubtitleStream {
                 index: Some(4),
                 ..SubtitleStream::default()
@@ -487,7 +510,13 @@ mod tests {
         let described: Vec<_> = remuxed
             .audio
             .iter()
-            .map(|a| (a.language.as_deref(), a.codec.as_deref(), a.profile.as_deref()))
+            .map(|a| {
+                (
+                    a.language.as_deref(),
+                    a.codec.as_deref(),
+                    a.profile.as_deref(),
+                )
+            })
             .collect();
         assert_eq!(
             described,

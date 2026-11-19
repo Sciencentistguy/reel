@@ -35,7 +35,10 @@ pub fn transfer(source: &Path, destination: &Path, operation: Operation) -> Resu
 
 /// A hidden name beside `destination` to build it under, so that it only appears once complete.
 pub fn partial_path(destination: &Path) -> PathBuf {
-    let stem = destination.file_stem().unwrap_or_default().to_string_lossy();
+    let stem = destination
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
     let name = match destination.extension() {
         Some(extension) => format!(".{stem}.partial.{}", extension.to_string_lossy()),
         None => format!(".{stem}.partial"),
