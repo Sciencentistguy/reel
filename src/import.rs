@@ -15,7 +15,7 @@ use crate::config::{Config, MetadataConfig, Operation};
 use crate::fileops;
 use crate::library::Library;
 use crate::metadata::{
-    self, Candidate, EpisodeCount, EpisodeInfo, Length, MovieSource, ShowSource,
+    self, Candidate, EpisodeCount, EpisodeInfo, Length, MovieSource, NotAired, ShowSource,
 };
 use crate::model::{Item, Kind, MediaInfo};
 use crate::naming;
@@ -72,12 +72,16 @@ pub struct Options {
     /// Place episode files even when their running time doesn't fit the episode's runtime.
     #[arg(long)]
     pub skip_length_check: bool,
+    /// The files are sport: match them to TheSportsDB's leagues and events by name and date, and
+    /// file them in the sport folder.
+    #[arg(short, long, conflicts_with = "kind")]
+    pub sport: bool,
 }
 
 /// Options for `reel rescan`, which adopts files already in the library folders.
 #[derive(clap::Args)]
 pub struct Rescan {
-    /// Directories to scan instead of the library's film and TV folders.
+    /// Directories to scan instead of the library's film, TV and sport folders.
     pub paths: Vec<PathBuf>,
     /// Never prompt; skip anything without a confident match.
     #[arg(short, long)]
@@ -94,6 +98,10 @@ pub struct Rescan {
     /// Place episode files even when their running time doesn't fit the episode's runtime.
     #[arg(long)]
     pub skip_length_check: bool,
+    /// The directories hold sport, to match against TheSportsDB. Without paths, the sport folder
+    /// is always scanned this way.
+    #[arg(short, long)]
+    pub sport: bool,
 }
 
 struct Pending {
@@ -507,7 +515,7 @@ fn with_episode_lists(
             if position >= lookups || candidate.episodes.is_some() {
                 return (distance, candidate);
             }
-            match source.episodes(&candidate.id, None) {
+            match episode_list(source, &candidate.id, files) {
                 Ok(episodes) => {
                     let penalty = missing_episode_penalty(files, &episodes);
                     candidate.episodes = Some(episodes);
@@ -794,6 +802,25 @@ fn base_item(group: &Group, file: &Pending, candidate: &Candidate) -> Item {
     item
 }
 
+/// The air dates date-based files are named with.
+fn air_dates(files: &[Pending]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter_map(|file| file.parsed.air_date.clone())
+        .collect()
+}
+
+/// The episodes to look for `files` among: those around their air dates for date-based files,
+/// as a sports league's whole history is a great many requests, or else the whole list.
+fn episode_list(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Result<Vec<EpisodeInfo>> {
+    let dates = air_dates(files);
+    if dates.is_empty() {
+        source.episodes(id, None)
+    } else {
+        source.episodes_aired(id, &dates)
+    }
+}
+
 fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<EpisodeInfo> {
     let fetch = |season: Option<u32>| {
         source.episodes(id, season).unwrap_or_else(|err| {
@@ -802,8 +829,12 @@ fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<E
             Vec::new()
         })
     };
-    if files.iter().any(|file| file.parsed.air_date.is_some()) {
-        return fetch(None);
+    let dates = air_dates(files);
+    if !dates.is_empty() {
+        return source.episodes_aired(id, &dates).unwrap_or_else(|err| {
+            eprintln!("  warning: cannot fetch episode list: {err:#}");
+            Vec::new()
+        });
     }
     let seasons: BTreeSet<u32> = files.iter().filter_map(|file| file.parsed.season).collect();
     seasons.into_iter().flat_map(|s| fetch(Some(s))).collect()
@@ -824,12 +855,23 @@ fn apply_episode(
     item.date_based = parsed.air_date.is_some();
 
     if let Some(date) = &parsed.air_date {
-        let Some(found) = episodes.iter().find(|e| e.air_date.as_ref() == Some(date)) else {
-            warn_about(
-                &item.path,
-                &format!("no episode of the show aired on {date}"),
-            );
-            return false;
+        let found = match metadata::aired_on(episodes, date, parsed.episode_title.as_deref(), None)
+        {
+            Ok(found) => found,
+            Err(NotAired::None) => {
+                warn_about(
+                    &item.path,
+                    &format!("no episode of the show aired on {date}"),
+                );
+                return false;
+            }
+            Err(NotAired::Several(count)) => {
+                warn_about(
+                    &item.path,
+                    &format!("{count} episodes aired on {date} and its name doesn't say which"),
+                );
+                return false;
+            }
         };
         if !fits(item, duration, &[found]) {
             return false;
@@ -1266,7 +1308,7 @@ impl Importer<'_> {
         if old.path != kept
             && let Some(parent) = old.path.parent()
         {
-            fileops::prune_empty_dirs(parent, naming::library_root(self.config, old.kind));
+            fileops::prune_empty_dirs(parent, naming::library_root(self.config, old));
         }
         if let Some(id) = old.id {
             self.library.remove(id)?;
@@ -1302,7 +1344,7 @@ impl Importer<'_> {
         let outcomes = remux::remux(&self.config.import.videoconverter, &self.remux_args, &jobs);
         let mut interrupted = 0;
         for (job, outcome) in queued.into_iter().zip(outcomes) {
-            let root = naming::library_root(self.config, job.item.kind).to_path_buf();
+            let root = naming::library_root(self.config, &job.item).to_path_buf();
             let parent = job.destination.parent().map(Path::to_path_buf);
             let source = job.source.clone();
             let Err(err) = outcome.and_then(|()| self.record_remux(job)) else {
@@ -1364,17 +1406,19 @@ trait Sources {
     fn shows(&mut self) -> Result<&dyn ShowSource>;
 }
 
-/// The metadata services the configuration names.
+/// The metadata services the configuration names, or TheSportsDB for shows when importing sport.
 struct Online<'a> {
     config: &'a MetadataConfig,
+    sport: bool,
     movies: Option<Box<dyn MovieSource>>,
     shows: Option<Box<dyn ShowSource>>,
 }
 
 impl<'a> Online<'a> {
-    fn new(config: &'a MetadataConfig) -> Self {
+    fn new(config: &'a MetadataConfig, sport: bool) -> Self {
         Online {
             config,
+            sport,
             movies: None,
             shows: None,
         }
@@ -1391,14 +1435,18 @@ impl Sources for Online<'_> {
 
     fn shows(&mut self) -> Result<&dyn ShowSource> {
         if self.shows.is_none() {
-            self.shows = Some(metadata::show_source(self.config)?);
+            self.shows = Some(if self.sport {
+                metadata::sport_source(self.config)
+            } else {
+                metadata::show_source(self.config)?
+            });
         }
         Ok(self.shows.as_deref().unwrap())
     }
 }
 
 pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<()> {
-    let mut sources = Online::new(&config.metadata);
+    let mut sources = Online::new(&config.metadata, options.sport);
     let ask = |new: &Item, path: &Path, existing: &[Item], remuxed: bool| {
         versions::ask(new, path, existing, remuxed, prompt)
     };
@@ -1416,30 +1464,17 @@ pub fn run(config: &Config, library: &mut Library, options: &Options) -> Result<
 /// Adds files that are in the library folders but missing from the database, leaving them where
 /// they are; `reel move` can rename them afterwards.
 pub fn rescan(config: &Config, library: &mut Library, rescan: Rescan) -> Result<()> {
-    let options = rescan_options(config, rescan)?;
-    let mut sources = Online::new(&config.metadata);
-    run_with(config, library, &options, true, &mut sources, None)
+    for options in rescan_options(config, rescan)? {
+        let mut sources = Online::new(&config.metadata, options.sport);
+        run_with(config, library, &options, true, &mut sources, None)?;
+    }
+    Ok(())
 }
 
-/// Import options that look in the library's own folders unless `rescan` names others.
-fn rescan_options(config: &Config, rescan: Rescan) -> Result<Options> {
-    let paths = if rescan.paths.is_empty() {
-        let roots: Vec<_> = [&config.library.movies, &config.library.tv]
-            .into_iter()
-            .filter(|root| root.is_dir())
-            .cloned()
-            .collect();
-        anyhow::ensure!(
-            !roots.is_empty(),
-            "neither {} nor {} exists",
-            config.library.movies.display(),
-            config.library.tv.display()
-        );
-        roots
-    } else {
-        rescan.paths
-    };
-    Ok(Options {
+/// Import options that look in the library's own folders unless `rescan` names others: one set
+/// for the film and TV folders, and another for the sport folder, which TheSportsDB matches.
+fn rescan_options(config: &Config, rescan: Rescan) -> Result<Vec<Options>> {
+    let options = |paths: Vec<PathBuf>, sport: bool| Options {
         paths,
         operation: None,
         remux_args: Vec::new(),
@@ -1449,7 +1484,35 @@ fn rescan_options(config: &Config, rescan: Rescan) -> Result<Options> {
         timid: rescan.timid,
         no_timid: rescan.no_timid,
         skip_length_check: rescan.skip_length_check,
-    })
+        sport,
+    };
+    if !rescan.paths.is_empty() {
+        return Ok(vec![options(rescan.paths.clone(), rescan.sport)]);
+    }
+    let library = &config.library;
+    let existing = |roots: &[&PathBuf]| -> Vec<PathBuf> {
+        roots
+            .iter()
+            .filter(|root| root.is_dir())
+            .map(|root| root.to_path_buf())
+            .collect()
+    };
+    let (shows, sport) = (
+        existing(&[&library.movies, &library.tv]),
+        existing(&[&library.sport]),
+    );
+    anyhow::ensure!(
+        !shows.is_empty() || !sport.is_empty(),
+        "none of {}, {} and {} exists",
+        library.movies.display(),
+        library.tv.display(),
+        library.sport.display()
+    );
+    Ok([(shows, false), (sport, true)]
+        .into_iter()
+        .filter(|(paths, _)| !paths.is_empty())
+        .map(|(paths, sport)| options(paths, sport))
+        .collect())
 }
 
 fn run_with(
@@ -1471,11 +1534,19 @@ fn run_with(
             continue;
         }
         let mut parsed = parse::parse(&path);
-        if let Some(kind) = options.kind
+        let kind = if options.sport {
+            Some(Kind::Episode)
+        } else {
+            options.kind
+        };
+        if let Some(kind) = kind
             && parsed.kind != kind
         {
             if kind == Kind::Episode {
-                eprintln!("warning: no episode number in {}; skipping", path.display());
+                eprintln!(
+                    "warning: no episode number or air date in {}; skipping",
+                    path.display()
+                );
                 continue;
             }
             parsed.kind = Kind::Movie;
@@ -2430,6 +2501,8 @@ mod tests {
         known: RefCell<Vec<Candidate>>,
         /// The episode list every show has.
         episodes: Vec<EpisodeInfo>,
+        /// The show source it stands in for, when not TVDB.
+        show_source: Option<&'static str>,
     }
 
     impl Echo {
@@ -2481,15 +2554,15 @@ mod tests {
 
     impl ShowSource for Echo {
         fn name(&self) -> &'static str {
-            "tvdb"
+            self.show_source.unwrap_or("tvdb")
         }
 
         fn search_shows(&self, title: &str, year: Option<i32>) -> Result<Vec<Candidate>> {
-            Ok(self.search("tvdb", title, year))
+            Ok(self.search(self.name(), title, year))
         }
 
         fn show(&self, id: &str) -> Result<Candidate> {
-            self.by_id("tvdb", id)
+            self.by_id(self.name(), id)
         }
 
         fn episodes(&self, _: &str, season: Option<u32>) -> Result<Vec<EpisodeInfo>> {
@@ -2525,6 +2598,7 @@ mod tests {
             let mut config = Config::default();
             config.library.movies = dir.path().join("Movies");
             config.library.tv = dir.path().join("TV");
+            config.library.sport = dir.path().join("Sport");
             config.import.probe = false;
             Env {
                 dir,
@@ -2593,16 +2667,19 @@ mod tests {
                 timid: false,
                 no_timid: false,
                 skip_length_check: false,
+                sport: false,
             };
-            let options = rescan_options(&self.config, rescan)?;
-            run_with(
-                &self.config,
-                &mut self.library,
-                &options,
-                true,
-                &mut self.sources,
-                None,
-            )
+            for options in rescan_options(&self.config, rescan)? {
+                run_with(
+                    &self.config,
+                    &mut self.library,
+                    &options,
+                    true,
+                    &mut self.sources,
+                    None,
+                )?;
+            }
+            Ok(())
         }
 
         fn rows(&self) -> Vec<Item> {
@@ -2627,7 +2704,57 @@ mod tests {
             timid: false,
             no_timid: false,
             skip_length_check: false,
+            sport: false,
         }
+    }
+
+    fn fixture(number: u32, title: &str, date: &str) -> EpisodeInfo {
+        EpisodeInfo {
+            season: 2023,
+            number,
+            title: Some(title.into()),
+            air_date: Some(date.into()),
+            runtime: None,
+        }
+    }
+
+    #[test]
+    fn sport_is_placed_by_date_and_fixture_in_the_sport_folder() {
+        let mut env = Env::new();
+        env.sources.show_source = Some("thesportsdb");
+        env.sources.episodes = vec![
+            fixture(1, "Arsenal vs Spurs", "2024-03-02"),
+            fixture(2, "Chelsea vs Fulham", "2024-03-02"),
+            fixture(3, "Bahrain Grand Prix", "2024-03-03"),
+        ];
+        env.write(
+            "in/English Premier League 2024-03-02 Chelsea vs Fulham.mkv",
+            "a",
+        );
+        env.write(
+            "in/English Premier League 2024-03-02 Arsenal v Spurs 1080p.mkv",
+            "b",
+        );
+        env.write("in/English Premier League 2024-03-02.mkv", "which?");
+        let mut options = options(&env, &["in"]);
+        options.sport = true;
+        env.import(&options).unwrap();
+
+        let season = "Sport/English Premier League {thesportsdb-1}/Season 2023";
+        assert_eq!(
+            env.paths(),
+            [
+                env.path(&format!(
+                    "{season}/English Premier League - 2024-03-02 - Arsenal vs Spurs.mkv"
+                )),
+                env.path(&format!(
+                    "{season}/English Premier League - 2024-03-02 - Chelsea vs Fulham.mkv"
+                )),
+            ],
+            "a file that doesn't say which fixture it is is skipped"
+        );
+        let numbers: Vec<_> = env.rows().iter().map(|item| item.episode).collect();
+        assert_eq!(numbers, [Some(1), Some(2)]);
     }
 
     #[test]
@@ -3151,7 +3278,7 @@ mod tests {
     fn rescanning_fails_when_no_library_folder_exists() {
         let mut env = Env::new();
         let error = env.rescan(&[], false).unwrap_err();
-        assert!(error.to_string().contains("neither"));
+        assert!(error.to_string().contains("none of"));
     }
 
     #[test]

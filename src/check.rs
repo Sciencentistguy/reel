@@ -12,6 +12,7 @@ use crate::library::Library;
 use crate::metadata::{self, EpisodeInfo, ShowSource, normalise};
 use crate::missing::shows;
 use crate::model::Item;
+use crate::naming;
 use crate::parse;
 use crate::query::Query;
 use crate::sync::{check_length, fetch_episodes, listed_episodes};
@@ -71,7 +72,9 @@ pub fn run(config: &Config, library: &Library, options: &Options) -> Result<()> 
         }
         for (index, misfit) in &review.misfits {
             let path = &items[*index].path;
-            let shown = path.strip_prefix(&config.library.tv).unwrap_or(path);
+            let shown = path
+                .strip_prefix(naming::library_root(config, &items[*index]))
+                .unwrap_or(path);
             println!("  {}: {misfit}", shown.display());
         }
         misfits += review.misfits.len();

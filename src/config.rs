@@ -18,6 +18,8 @@ pub struct LibraryConfig {
     pub database: PathBuf,
     pub movies: PathBuf,
     pub tv: PathBuf,
+    /// Where leagues matched against TheSportsDB are filed.
+    pub sport: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -72,6 +74,9 @@ pub struct MetadataConfig {
     pub tmdb_api_key: String,
     /// TVDB v4 API key. `TVDB_API_KEY` overrides it.
     pub tvdb_api_key: String,
+    /// TheSportsDB v1 API key. `THESPORTSDB_API_KEY` overrides it. Left empty, the free key is
+    /// used, which only returns the first few results of each request.
+    pub thesportsdb_api_key: String,
     /// File holding the TMDB key, for keeping secrets out of the configuration file. Used when
     /// neither `tmdb_api_key` nor `TMDB_API_KEY` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -79,6 +84,9 @@ pub struct MetadataConfig {
     /// File holding the TVDB key, used like `tmdb_api_key_file`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tvdb_api_key_file: Option<PathBuf>,
+    /// File holding TheSportsDB key, used like `tmdb_api_key_file`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thesportsdb_api_key_file: Option<PathBuf>,
     /// TMDB language tag.
     pub tmdb_language: String,
     /// TVDB three-letter language code.
@@ -95,6 +103,7 @@ impl Default for LibraryConfig {
             database: data.join("reel").join("library.db"),
             movies: videos.join("Movies"),
             tv: videos.join("TV Shows"),
+            sport: videos.join("Sport"),
         }
     }
 }
@@ -125,8 +134,10 @@ impl Default for MetadataConfig {
             tv_source: TvSource::Tvdb,
             tmdb_api_key: String::new(),
             tvdb_api_key: String::new(),
+            thesportsdb_api_key: String::new(),
             tmdb_api_key_file: None,
             tvdb_api_key_file: None,
+            thesportsdb_api_key_file: None,
             tmdb_language: "en-US".into(),
             tvdb_language: "eng".into(),
         }
@@ -179,6 +190,7 @@ impl Config {
             &mut config.library.database,
             &mut config.library.movies,
             &mut config.library.tv,
+            &mut config.library.sport,
         ] {
             *dir = resolve(dir, config_dir);
         }
@@ -193,6 +205,11 @@ impl Config {
                 "TVDB_API_KEY",
                 &mut metadata.tvdb_api_key,
                 &metadata.tvdb_api_key_file,
+            ),
+            (
+                "THESPORTSDB_API_KEY",
+                &mut metadata.thesportsdb_api_key,
+                &metadata.thesportsdb_api_key_file,
             ),
         ] {
             if let Ok(value) = std::env::var(var)
@@ -222,6 +239,7 @@ impl Config {
         for key in [
             &mut config.metadata.tmdb_api_key,
             &mut config.metadata.tvdb_api_key,
+            &mut config.metadata.thesportsdb_api_key,
         ] {
             if !key.is_empty() {
                 *key = "<redacted>".into();
@@ -347,9 +365,11 @@ mod tests {
 
     #[test]
     fn relative_library_paths_follow_the_config_file() {
-        let (dir, config) = load("[library]\ndatabase = \"db/library.db\"\ntv = \"Shows\"\n");
+        let (dir, config) =
+            load("[library]\ndatabase = \"db/library.db\"\ntv = \"Shows\"\nsport = \"Sport\"\n");
         assert_eq!(config.library.database, dir.path().join("db/library.db"));
         assert_eq!(config.library.tv, dir.path().join("Shows"));
+        assert_eq!(config.library.sport, dir.path().join("Sport"));
     }
 
     #[test]

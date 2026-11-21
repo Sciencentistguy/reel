@@ -1,5 +1,6 @@
 //! Online metadata sources and candidate scoring.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::thread;
 use std::time::Duration;
@@ -9,6 +10,7 @@ use serde::de::DeserializeOwned;
 
 use crate::config::{MetadataConfig, TvSource};
 
+pub mod thesportsdb;
 pub mod tmdb;
 pub mod tvdb;
 
@@ -90,10 +92,65 @@ pub trait ShowSource {
     fn show(&self, id: &str) -> Result<Candidate>;
     /// Episodes of one season, or of the whole show when `season` is `None`.
     fn episodes(&self, id: &str, season: Option<u32>) -> Result<Vec<EpisodeInfo>>;
+    /// Episodes that include those aired on `dates`, for placing date-based files. Sources that
+    /// can't fetch less than the whole show give all of it.
+    fn episodes_aired(&self, id: &str, _dates: &BTreeSet<String>) -> Result<Vec<EpisodeInfo>> {
+        self.episodes(id, None)
+    }
+}
+
+/// Why no single episode aired on a date could be chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAired {
+    None,
+    /// Several episodes aired that day and nothing told them apart.
+    Several(usize),
+}
+
+/// The episode aired on `date`. When several were, as in a day of a sports league, the one whose
+/// title clearly best matches `title` is chosen, or else the one numbered `number`.
+pub fn aired_on<'a>(
+    episodes: &'a [EpisodeInfo],
+    date: &str,
+    title: Option<&str>,
+    number: Option<u32>,
+) -> Result<&'a EpisodeInfo, NotAired> {
+    let that_day: Vec<_> = episodes
+        .iter()
+        .filter(|episode| episode.air_date.as_deref() == Some(date))
+        .collect();
+    match that_day[..] {
+        [] => return Err(NotAired::None),
+        [only] => return Ok(only),
+        _ => {}
+    }
+    if let Some(title) = title.map(normalise).filter(|title| !title.is_empty()) {
+        let mut scored: Vec<_> = that_day
+            .iter()
+            .map(|&episode| {
+                let named = normalise(episode.title.as_deref().unwrap_or_default());
+                (strsim::normalized_levenshtein(&title, &named), episode)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let (best, episode) = scored[0];
+        if best >= 0.5 && best - scored[1].0 >= 0.1 {
+            return Ok(episode);
+        }
+    }
+    number
+        .and_then(|number| that_day.iter().find(|episode| episode.number == number))
+        .copied()
+        .ok_or(NotAired::Several(that_day.len()))
 }
 
 pub fn movie_source(config: &MetadataConfig) -> Result<Box<dyn MovieSource>> {
     Ok(Box::new(tmdb::Tmdb::new(config)?))
+}
+
+/// Where sports leagues are looked up.
+pub fn sport_source(config: &MetadataConfig) -> Box<dyn ShowSource> {
+    Box::new(thesportsdb::TheSportsDb::new(config))
 }
 
 pub fn show_source(config: &MetadataConfig) -> Result<Box<dyn ShowSource>> {
@@ -108,6 +165,7 @@ pub fn show_source_named(config: &MetadataConfig, name: &str) -> Result<Box<dyn 
     Ok(match name {
         "tvdb" => Box::new(tvdb::Tvdb::new(config)?),
         "tmdb" => Box::new(tmdb::Tmdb::new(config)?),
+        "thesportsdb" => sport_source(config),
         _ => bail!("unknown metadata source {name:?}"),
     })
 }
@@ -914,6 +972,48 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("TMDB API key")
+        );
+    }
+
+    fn aired(number: u32, title: &str, date: &str) -> EpisodeInfo {
+        EpisodeInfo {
+            season: 2023,
+            number,
+            title: Some(title.into()),
+            air_date: Some(date.into()),
+            runtime: None,
+        }
+    }
+
+    #[test]
+    fn episodes_sharing_an_air_date_are_told_apart_by_title_or_number() {
+        let day = [
+            aired(1, "Arsenal vs Spurs", "2023-08-12"),
+            aired(2, "Spurs vs Arsenal", "2024-03-02"),
+            aired(3, "Chelsea vs Fulham", "2024-03-02"),
+        ];
+        let number = |found: Result<&EpisodeInfo, NotAired>| found.map(|e| e.number);
+        assert_eq!(number(aired_on(&day, "2023-08-12", None, None)), Ok(1));
+        assert_eq!(
+            number(aired_on(&day, "2020-01-01", None, None)),
+            Err(NotAired::None)
+        );
+        assert_eq!(
+            number(aired_on(&day, "2024-03-02", None, None)),
+            Err(NotAired::Several(2))
+        );
+        assert_eq!(
+            number(aired_on(&day, "2024-03-02", Some("Chelsea v Fulham"), None)),
+            Ok(3)
+        );
+        assert_eq!(
+            number(aired_on(&day, "2024-03-02", Some("Highlights"), Some(2))),
+            Ok(2),
+            "the number decides when the title doesn't"
+        );
+        assert_eq!(
+            number(aired_on(&day, "2024-03-02", Some("Highlights"), None)),
+            Err(NotAired::Several(2))
         );
     }
 }

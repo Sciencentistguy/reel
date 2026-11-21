@@ -88,12 +88,18 @@ pub fn relative_path(
     path
 }
 
-pub fn library_root(config: &Config, kind: Kind) -> &Path {
-    match kind {
+/// The folder an item is filed under: sports leagues have their own, as Plex can't match them
+/// with its TV agents.
+pub fn library_root<'a>(config: &'a Config, item: &Item) -> &'a Path {
+    match item.kind {
         Kind::Movie => &config.library.movies,
+        Kind::Episode if item.source.as_deref() == Some(SPORT_SOURCE) => &config.library.sport,
         Kind::Episode => &config.library.tv,
     }
 }
+
+/// The source whose leagues are filed in the sport folder.
+pub const SPORT_SOURCE: &str = "thesportsdb";
 
 pub fn destination(config: &Config, item: &Item, version: Option<&str>) -> PathBuf {
     let extension = item
@@ -102,7 +108,7 @@ pub fn destination(config: &Config, item: &Item, version: Option<&str>) -> PathB
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    library_root(config, item.kind).join(relative_path(
+    library_root(config, item).join(relative_path(
         item,
         config.naming.id_tags,
         version,

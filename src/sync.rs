@@ -132,8 +132,13 @@ pub fn fetch_episodes(
     id: &str,
     items: &[Item],
 ) -> Result<Vec<EpisodeInfo>> {
-    if items.iter().any(|item| item.date_based) {
-        return source.episodes(id, None);
+    let dates: BTreeSet<String> = items
+        .iter()
+        .filter(|item| item.date_based)
+        .filter_map(|item| item.air_date.clone())
+        .collect();
+    if !dates.is_empty() {
+        return source.episodes_aired(id, &dates);
     }
     let seasons: BTreeSet<u32> = items.iter().filter_map(|item| item.season).collect();
     let mut episodes = Vec::new();
@@ -202,9 +207,9 @@ pub fn listed_episodes<'a>(
     episodes: &'a [EpisodeInfo],
 ) -> (Vec<&'a EpisodeInfo>, bool) {
     if item.date_based {
-        let found = episodes
-            .iter()
-            .find(|episode| episode.air_date.is_some() && episode.air_date == item.air_date);
+        let found = item.air_date.as_deref().and_then(|date| {
+            metadata::aired_on(episodes, date, item.episode_title.as_deref(), item.episode).ok()
+        });
         return (found.into_iter().collect(), found.is_some());
     }
     let (Some(season), Some(first)) = (item.season, item.episode) else {

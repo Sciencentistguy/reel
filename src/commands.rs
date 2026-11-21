@@ -202,7 +202,7 @@ pub fn relocate(
 }
 
 fn prune(config: &Config, item: &Item) {
-    let root = naming::library_root(config, item.kind);
+    let root = naming::library_root(config, item);
     if let Some(parent) = item.path.parent() {
         fileops::prune_empty_dirs(parent, root);
     }
@@ -489,6 +489,7 @@ mod tests {
             let mut config = Config::default();
             config.library.movies = dir.path().join("Movies");
             config.library.tv = dir.path().join("TV");
+            config.library.sport = dir.path().join("Sport");
             Fixture {
                 dir,
                 config,

@@ -1,6 +1,6 @@
 # reel
 
-A library manager for films and TV shows, in the spirit of [beets](https://github.com/beetbox/beets).
+A library manager for films, TV shows and sport, in the spirit of [beets](https://github.com/beetbox/beets).
 `reel` identifies video files, files them into a directory tree that follows Plex's naming
 conventions for [films](https://support.plex.tv/articles/naming-and-organizing-your-movie-media-files/)
 and [TV shows](https://support.plex.tv/articles/naming-and-organizing-your-tv-show-files/), and keeps
@@ -31,6 +31,7 @@ Then edit the configuration:
 database = "~/.local/share/reel/library.db"
 movies = "~/Videos/Movies"
 tv = "~/Videos/TV Shows"
+sport = "~/Videos/Sport"  # leagues matched against TheSportsDB
 
 [import]
 operation = "copy"      # copy | move | hardlink | symlink | reflink | remux
@@ -48,6 +49,7 @@ id_tags = true          # {tmdb-123} / {tvdb-123} folder tags
 tv_source = "tvdb"      # or "tmdb"
 tmdb_api_key = ""       # v3 key or v4 read access token; or set TMDB_API_KEY
 tvdb_api_key = ""       # v4 key; or set TVDB_API_KEY
+thesportsdb_api_key = ""  # or set THESPORTSDB_API_KEY; empty uses the limited free key
 tmdb_language = "en-US"
 tvdb_language = "eng"
 ```
@@ -58,7 +60,8 @@ The `remux` operation needs [videoconverter](https://github.com/Sciencentistguy/
 Films are always matched against TMDB. Shows are matched against TVDB by default, or TMDB with
 `tv_source = "tmdb"`. `ffprobe` (from ffmpeg) must be on `PATH` for media information.
 
-API keys can also be kept in separate files with `tmdb_api_key_file` and `tvdb_api_key_file`.
+API keys can also be kept in separate files with `tmdb_api_key_file`, `tvdb_api_key_file` and
+`thesportsdb_api_key_file`.
 A key is taken from the environment variable first, then the inline setting, then the file.
 
 When a user has no configuration file, `/etc/reel/config.toml` is used if it exists.
@@ -97,11 +100,12 @@ module writes the system-wide `/etc/reel/config.toml`.
 | Command | Purpose |
 | --- | --- |
 | `reel import PATH...` | Identify files and file them into the library |
+| `reel import --sport PATH...` | As `import`, matching against TheSportsDB's leagues and events |
 | `reel rescan [PATH...]` | Add files already in the library folders but missing from the database |
 | `reel list [QUERY]` | List items (`-f` for a template, `-p` for paths) |
 | `reel info [QUERY]` | Show everything known about items, including streams |
 | `reel move [QUERY]` | Rename files to match the current naming scheme |
-| `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB, renaming files to match |
+| `reel sync [QUERY]` | Refresh titles and episode data from TMDB/TVDB/TheSportsDB, renaming files to match |
 | `reel missing [QUERY]` | List aired episodes of shows with no file (`-s` includes specials) |
 | `reel unmatched` | List video files in the library folders that are not in the database |
 | `reel check [QUERY]` | List episode files whose length or own title doesn't fit the episode they are matched to |
@@ -121,7 +125,7 @@ search again, enter an ID (or paste a TMDB or TVDB page URL, or a TVDB slug), se
 group (overriding any `{edition-…}` in the names), list the group's files, or skip. `--quiet` never prompts and skips
 anything uncertain. `--timid` (or `timid = true`) asks even about certain matches and ID-tagged
 names, so with `--quiet` it skips everything; `--no-timid` overrides the configuration. `--pretend` (or `--dry-run`) shows what would happen.
-Everything imported is matched to TMDB or TVDB; files that can't be matched are skipped.
+Everything imported is matched to TMDB or TVDB (or TheSportsDB, for sport); files that can't be matched are skipped.
 
 An entered ID or URL is shown with its match percentage. A confident match is used straight
 away, as with search results; otherwise, or in timid mode, you are asked to confirm it.
@@ -203,7 +207,7 @@ records them where they are. Nothing is moved or renamed; run `reel move` afterw
 names in line with the naming scheme. It accepts the same `--quiet`, `--timid`, `--no-timid`
 and `--pretend` flags, and never removes rows (that's `reel update`).
 
-`reel sync` refreshes items that were matched to TMDB or TVDB. It fetches each film or show once
+`reel sync` refreshes items that were matched to TMDB, TVDB or TheSportsDB. It fetches each film or show once
 from the source it was matched against (even if `tv_source` has changed since), updates titles,
 years, episode titles and air dates, and prints what changed. Files are then renamed to match, as
 `reel move` would; `--no-move` (`-M`) only updates the database, and `--pretend` shows what would
@@ -250,6 +254,38 @@ Handled along the way:
 - Sidecar subtitles are renamed with their video, keeping suffixes such as `.en.forced.srt`.
 - Samples and Plex extras folders (`Featurettes`, `Trailers`, …) are ignored.
 
+#### Sport
+
+`reel import --sport` (`-s`) matches files against [TheSportsDB](https://www.thesportsdb.com)
+instead of TMDB and TVDB. A league stands in for a show, each of its seasons for a season (numbered
+by the year it starts in, so `2023-2024` is `Season 2023`), and each event for a date-based episode.
+Files are filed in the `sport` folder rather than the TV one, since Plex's TV agents can't match
+leagues: give that folder a Plex library of its own using the Personal Media Shows agent.
+
+```
+Sport/
+  English Premier League {thesportsdb-4328}/
+    Season 2023/
+      English Premier League - 2024-03-02 - Arsenal vs Spurs.mkv
+```
+
+Names are read as for date-based shows, so `Formula 1 2024-03-02 Bahrain Grand Prix.mkv` (the form
+TheSportsDB itself gives events) is the league, the event's date and its name. When several events
+took place that day, as a day of a football league's fixtures did, the words after the date pick the
+one whose name they clearly match (`Arsenal v Spurs` finds `Arsenal vs Spurs`); a file that doesn't
+say which is asked about or skipped. Dates are TheSportsDB's, which are UTC, so a recording of a
+late kick-off may need the next day's date. `reel rescan` scans the sport folder this way too, and
+`reel rescan --sport PATH` does for other folders. `sync`, `missing`, `check` and `unmatched` treat
+leagues as they do shows. Events carry no running time, so files are never rejected for their length.
+
+TheSportsDB's v1 API has no league search, so reel fetches its list of leagues and compares names;
+a league can also be entered by ID or by its page URL (`https://www.thesportsdb.com/league/4370`).
+Without `thesportsdb_api_key` reel uses the free key, which TheSportsDB limits to 30 requests a
+minute and to the first few results of each: ten leagues, five seasons and fifteen events of a
+season. So with the free key few leagues can be found by name, and no event beyond a season's
+first fifteen can be placed: for more than a trial a
+[premium key](https://www.thesportsdb.com/pricing) is needed.
+
 ### Queries
 
 Queries follow beets: bare words match film, show and episode titles; `field:value` matches a
@@ -283,7 +319,7 @@ The FEL/MEL distinction is a heuristic on the RPU's non-linear quantisation para
 | Module | Role |
 | --- | --- |
 | `parse` | File name → title, year, episode numbering, edition, part |
-| `metadata` | `MovieSource`/`ShowSource` traits, TMDB and TVDB clients, candidate scoring |
+| `metadata` | `MovieSource`/`ShowSource` traits, TMDB, TVDB and TheSportsDB clients, candidate scoring |
 | `import` | Discovery, grouping, match decisions, and the per-file import step |
 | `naming` | Plex-convention paths, sidecar subtitle discovery |
 | `fileops`, `remux` | Placing files: copy, move, links, and remuxing with videoconverter |

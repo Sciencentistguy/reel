@@ -164,7 +164,7 @@ pub fn parse_name(name: &str) -> Parsed {
         let (key, value) = (caps[1].to_lowercase(), caps[2].trim().to_string());
         match key.as_str() {
             "edition" => edition = Some(value),
-            "tmdb" | "tvdb" | "imdb" => id_hint = Some((key, value)),
+            "tmdb" | "tvdb" | "imdb" | "thesportsdb" => id_hint = Some((key, value)),
             _ => {}
         }
     }

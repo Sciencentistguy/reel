@@ -84,6 +84,7 @@ impl Coverage {
         for item in items {
             if item.date_based {
                 coverage.dates.extend(item.air_date.clone());
+                coverage.numbers.extend(item.season.zip(item.episode));
             } else if let (Some(season), Some(first)) = (item.season, item.episode) {
                 for number in first..=item.episode_end.unwrap_or(first).max(first) {
                     coverage.numbers.insert((season, number));
@@ -93,12 +94,14 @@ impl Coverage {
         coverage
     }
 
-    fn covers(&self, episode: &EpisodeInfo) -> bool {
+    /// Whether a file holds `episode`. A file's air date only stands for an episode that aired
+    /// alone that day: of a day's sports fixtures, only the numbered one is held.
+    fn covers(&self, episode: &EpisodeInfo, shared_dates: &HashSet<&str>) -> bool {
         self.numbers.contains(&(episode.season, episode.number))
             || episode
                 .air_date
-                .as_ref()
-                .is_some_and(|date| self.dates.contains(date))
+                .as_deref()
+                .is_some_and(|date| self.dates.contains(date) && !shared_dates.contains(date))
     }
 }
 
@@ -110,11 +113,17 @@ fn missing<'a>(
     today: &str,
 ) -> Vec<&'a EpisodeInfo> {
     let held = Coverage::of(items);
+    let mut seen = HashSet::new();
+    let shared_dates: HashSet<&str> = episodes
+        .iter()
+        .filter_map(|episode| episode.air_date.as_deref())
+        .filter(|&date| !seen.insert(date))
+        .collect();
     episodes
         .iter()
         .filter(|episode| specials || episode.season != 0)
         .filter(|episode| episode.air_date.as_deref().is_none_or(|date| date <= today))
-        .filter(|episode| !held.covers(episode))
+        .filter(|episode| !held.covers(episode, &shared_dates))
         .collect()
 }
 
@@ -240,6 +249,22 @@ mod tests {
         assert_eq!(
             codes(&missing(&[daily], &episodes, false, "2026-01-01")),
             [(2024, 2)]
+        );
+    }
+
+    #[test]
+    fn a_fixture_covers_only_itself_on_a_day_of_several() {
+        let episodes = [
+            episode(2024, 1, Some("2024-03-02")),
+            episode(2024, 2, Some("2024-03-02")),
+            episode(2024, 3, Some("2024-03-03")),
+        ];
+        let mut fixture = file(2024, 2, None);
+        fixture.date_based = true;
+        fixture.air_date = Some("2024-03-02".into());
+        assert_eq!(
+            codes(&missing(&[fixture], &episodes, false, "2026-01-01")),
+            [(2024, 1), (2024, 3)]
         );
     }
 

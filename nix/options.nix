@@ -38,7 +38,8 @@ in
         Contents of reel's `config.toml`; anything left out keeps its default.
 
         The file ends up world-readable in the Nix store, so supply API keys through
-        `metadata.tmdb_api_key_file` and `metadata.tvdb_api_key_file` rather than inline.
+        `metadata.tmdb_api_key_file`, `metadata.tvdb_api_key_file` and
+        `metadata.thesportsdb_api_key_file` rather than inline.
       '';
     };
   };

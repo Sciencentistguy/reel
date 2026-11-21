@@ -9,24 +9,25 @@ use anyhow::Result;
 use crate::config::Config;
 use crate::import;
 use crate::library::Library;
-use crate::model::{Item, Kind};
+use crate::model::Item;
+use crate::naming;
 use crate::query::Query;
 
 pub fn run(config: &Config, library: &Library) -> Result<()> {
     let items = library.query(&Query::default())?;
-    let mut roots = vec![
-        (Kind::Movie, LibraryFolder::new(&config.library.movies)),
-        (Kind::Episode, LibraryFolder::new(&config.library.tv)),
-    ];
-    roots.dedup_by(|a, b| a.1.canonical.is_some() && a.1.canonical == b.1.canonical);
+    let folders = &config.library;
+    let mut roots: Vec<_> = [&folders.movies, &folders.tv, &folders.sport]
+        .into_iter()
+        .map(|root| LibraryFolder::new(root))
+        .collect();
+    roots.dedup_by(|a, b| a.canonical.is_some() && a.canonical == b.canonical);
     let mut total = 0;
 
-    for (kind, folder) in &roots {
-        let known = folder.labels(
-            items
-                .iter()
-                .filter(|item| roots.len() == 1 || item.kind == *kind),
-        );
+    for folder in &roots {
+        let known =
+            folder.labels(items.iter().filter(|item| {
+                roots.len() == 1 || naming::library_root(config, item) == folder.root
+            }));
         for (top, files) in folder.untracked(library)? {
             let (location, note) = match &top {
                 Some(name) => {
@@ -148,6 +149,7 @@ fn label(item: &Item) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Kind;
 
     fn write(dir: &Path, relative: &str) -> PathBuf {
         let path = dir.join(relative);
