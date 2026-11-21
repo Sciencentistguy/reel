@@ -1,8 +1,9 @@
 //! TheSportsDB (API v1). Leagues stand in for shows, their seasons for seasons, and events for
 //! date-based episodes.
 
-use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -16,6 +17,17 @@ const BASE: &str = "https://www.thesportsdb.com/api/v1/json";
 /// The key TheSportsDB gives everyone, which caps how many results each request returns.
 const FREE_KEY: &str = "123";
 
+/// The most events the free key lists of a season; a round's events are listed in full.
+const FREE_SEASON_EVENTS: usize = 15;
+
+/// Round numbers from here on stand for stages rather than rounds: 500 for pre-season, 125 to
+/// 200 for playoffs.
+const SPECIAL_ROUNDS: u32 = 100;
+
+/// Rounds in a row found empty before a season is taken to be over, so that a cancelled round
+/// doesn't end it early.
+const EMPTY_ROUNDS: u32 = 3;
+
 /// How many leagues a search offers.
 const SEARCH_RESULTS: usize = 10;
 
@@ -25,6 +37,8 @@ pub struct TheSportsDb {
     key: String,
     /// Every league TheSportsDB knows, fetched for the first search, since v1 can't search them.
     leagues: OnceCell<Vec<LeagueSummary>>,
+    /// Each season's events by league and season name, as the free key takes a request per round.
+    seasons: RefCell<HashMap<(String, String), Vec<Event>>>,
 }
 
 #[derive(Deserialize)]
@@ -70,7 +84,7 @@ struct Events {
     events: Option<Vec<Event>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Event {
     #[serde(rename = "idEvent")]
     id: String,
@@ -82,6 +96,8 @@ struct Event {
     timestamp: Option<String>,
     #[serde(rename = "idLeague")]
     league_id: Option<String>,
+    #[serde(rename = "intRound")]
+    round: Option<String>,
     #[serde(rename = "strLeague")]
     league: Option<String>,
 }
@@ -163,19 +179,24 @@ impl TheSportsDb {
         let key = match config.thesportsdb_api_key.as_str() {
             "" => {
                 eprintln!(
-                    "note: using TheSportsDB's free API key, which returns only the first few \
-                     leagues and events of each request; set metadata.thesportsdb_api_key or \
-                     THESPORTSDB_API_KEY for complete results"
+                    "note: using TheSportsDB's free API key, which finds few leagues by name and \
+                     is slow to list a season's events; set metadata.thesportsdb_api_key or \
+                     THESPORTSDB_API_KEY to lift its limits"
                 );
                 FREE_KEY.to_string()
             }
             key => key.to_string(),
         };
+        let mut http = Http::new("TheSportsDB");
+        // The free key's rate limit asks for waits of two minutes, which retrying sooner only
+        // extends.
+        http.retry.max_wait = Duration::from_secs(150);
         TheSportsDb {
             base: base.to_string(),
-            http: Http::new("TheSportsDB"),
+            http,
             key,
             leagues: OnceCell::new(),
+            seasons: RefCell::default(),
         }
     }
 
@@ -209,9 +230,53 @@ impl TheSportsDb {
             .collect())
     }
 
+    /// A season's events. Where the free key cuts the season's list short, its rounds are listed
+    /// one by one; events outside any round beyond the cut are still missed.
     fn events(&self, id: &str, season: &str) -> Result<Vec<Event>> {
+        let key = (id.to_string(), season.to_string());
+        if let Some(events) = self.seasons.borrow().get(&key) {
+            return Ok(events.clone());
+        }
         let found: Events = self.get("eventsseason.php", &[("id", id), ("s", season)])?;
-        Ok(found.events.unwrap_or_default())
+        let mut events = found.events.unwrap_or_default();
+        if self.key == FREE_KEY && events.len() >= FREE_SEASON_EVENTS {
+            // The list's last round may be cut short, but those before it are whole.
+            let last = events
+                .iter()
+                .filter_map(|event| event.round.as_deref()?.parse().ok())
+                .filter(|&round| round < SPECIAL_ROUNDS)
+                .max()
+                .unwrap_or(1);
+            events.extend(self.events_by_round(id, season, last)?);
+        }
+        self.seasons.borrow_mut().insert(key, events.clone());
+        Ok(events)
+    }
+
+    /// The events of each round from `first` on.
+    fn events_by_round(&self, id: &str, season: &str, first: u32) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
+        let mut empty = 0;
+        for round in first.max(1).. {
+            let round = round.to_string();
+            let found: Events = self.get(
+                "eventsround.php",
+                &[("id", id), ("r", &round), ("s", season)],
+            )?;
+            match found.events {
+                Some(listed) if !listed.is_empty() => {
+                    empty = 0;
+                    events.extend(listed);
+                }
+                _ => {
+                    empty += 1;
+                    if empty == EMPTY_ROUNDS {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(events)
     }
 
     /// The event with ID `id`, and the ID of its league.
@@ -392,7 +457,7 @@ mod tests {
             ..MetadataConfig::default()
         };
         let mut client = TheSportsDb::with_base(&config, &server.base);
-        client.http.retry.backoff = std::time::Duration::ZERO;
+        client.http.retry.backoff = Duration::ZERO;
         client
     }
 
@@ -527,6 +592,80 @@ mod tests {
                 .to_string()
                 .contains("no event 1")
         );
+    }
+
+    #[test]
+    fn a_season_cut_short_by_the_free_key_is_listed_round_by_round() {
+        // Rounds 1–8 of three events each, with round 6 cancelled; the season's list stops at
+        // the free key's first fifteen, the end of round 5.
+        let all: Vec<(u32, String)> = [1, 2, 3, 4, 5, 7, 8]
+            .into_iter()
+            .flat_map(|round| {
+                (1..=3).map(move |session| {
+                    let date = format!("2026-{round:02}-0{session}");
+                    let id = (round * 10 + session).to_string();
+                    let event = event(&id, &format!("Round {round} {session}"), &date, "12:00");
+                    // Pre-season testing, numbered as TheSportsDB does.
+                    let listed = if (round, session) == (1, 1) {
+                        500
+                    } else {
+                        round
+                    };
+                    let field = format!(r#"{{"intRound": "{listed}", "#);
+                    (round, event.replacen('{', &field, 1))
+                })
+            })
+            .collect();
+        let listing = |events: Vec<&String>| {
+            let events: Vec<&str> = events.into_iter().map(String::as_str).collect();
+            ok(&format!(r#"{{"events": [{}]}}"#, events.join(",")))
+        };
+        let server = Server::start(move |request: &Request| {
+            let path = request.path();
+            if path.ends_with("search_all_seasons.php") {
+                ok(r#"{"seasons": [{"strSeason": "2026"}]}"#)
+            } else if path.ends_with("eventsseason.php") {
+                listing(
+                    all.iter()
+                        .take(FREE_SEASON_EVENTS)
+                        .map(|(_, e)| e)
+                        .collect(),
+                )
+            } else {
+                let round: u32 = request.param("r").unwrap().parse().unwrap();
+                match all
+                    .iter()
+                    .filter(|(r, _)| *r == round)
+                    .map(|(_, e)| e)
+                    .collect::<Vec<_>>()
+                {
+                    found if found.is_empty() => ok(r#"{"events": null}"#),
+                    found => listing(found),
+                }
+            }
+        });
+        let free = client(&server, "");
+        let episodes = free.episodes("4370", Some(2026)).unwrap();
+        assert_eq!(episodes.len(), 21, "every event, once");
+        assert_eq!(episodes.last().unwrap().title.as_deref(), Some("Round 8 3"));
+        assert_eq!(episodes.last().unwrap().number, 21);
+
+        free.episodes("4370", Some(2026)).unwrap();
+        let rounds: Vec<_> = server
+            .requests()
+            .iter()
+            .filter_map(|r| r.param("r"))
+            .collect();
+        assert_eq!(
+            rounds,
+            ["5", "6", "7", "8", "9", "10", "11"],
+            "rounds the list covers aren't fetched again, a cancelled round doesn't end the \
+             season, and seasons are fetched once"
+        );
+
+        let paid = league_server();
+        client(&paid, "key").episodes("4328", Some(2023)).unwrap();
+        assert!(paid.paths().iter().all(|p| !p.ends_with("eventsround.php")));
     }
 
     #[test]

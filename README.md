@@ -283,11 +283,14 @@ leagues as they do shows. Events carry no running time, so files are never rejec
 
 TheSportsDB's v1 API has no league search, so reel fetches its list of leagues and compares names;
 a league can also be entered by ID or by its page URL (`https://www.thesportsdb.com/league/4370`).
-Without `thesportsdb_api_key` reel uses the free key, which TheSportsDB limits to 30 requests a
-minute and to the first few results of each: ten leagues, five seasons and fifteen events of a
-season. So with the free key few leagues can be found by name, and no event beyond a season's
-first fifteen can be placed: for more than a trial a
-[premium key](https://www.thesportsdb.com/pricing) is needed.
+Without `thesportsdb_api_key` reel uses the free key, which TheSportsDB limits to about 30
+requests before a two-minute wait, and to the first few results of each: ten leagues, five seasons
+and fifteen events of a season. So with the free key few leagues can be found by name: enter the
+league by its ID, or by the page URL of the league or any of its events. A season cut short is
+listed round by round from where its list stops, as the free key gives rounds in full: a request
+per round, fetched once per season each run, so a long season may wait out the rate limit.
+Events outside any round, such as pre-season testing, are missed beyond the season's first
+fifteen. A [premium key](https://www.thesportsdb.com/pricing) has none of these limits.
 
 ### Queries
 
