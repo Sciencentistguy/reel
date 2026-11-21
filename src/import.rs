@@ -821,7 +821,11 @@ fn episode_list(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Result<
     }
 }
 
-fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<EpisodeInfo> {
+fn fetch_episodes<'a>(
+    source: &dyn ShowSource,
+    id: &str,
+    names: impl IntoIterator<Item = &'a Parsed>,
+) -> Vec<EpisodeInfo> {
     let fetch = |season: Option<u32>| {
         source.episodes(id, season).unwrap_or_else(|err| {
             let scope = season.map_or("episode list".to_string(), |s| format!("season {s}"));
@@ -829,14 +833,18 @@ fn fetch_episodes(source: &dyn ShowSource, id: &str, files: &[Pending]) -> Vec<E
             Vec::new()
         })
     };
-    let dates = air_dates(files);
+    let names: Vec<&Parsed> = names.into_iter().collect();
+    let dates: BTreeSet<String> = names
+        .iter()
+        .filter_map(|parsed| parsed.air_date.clone())
+        .collect();
     if !dates.is_empty() {
         return source.episodes_aired(id, &dates).unwrap_or_else(|err| {
             eprintln!("  warning: cannot fetch episode list: {err:#}");
             Vec::new()
         });
     }
-    let seasons: BTreeSet<u32> = files.iter().filter_map(|file| file.parsed.season).collect();
+    let seasons: BTreeSet<u32> = names.iter().filter_map(|parsed| parsed.season).collect();
     seasons.into_iter().flat_map(|s| fetch(Some(s))).collect()
 }
 
@@ -883,6 +891,7 @@ fn apply_episode(
     }
 
     let (Some(season), Some(first)) = (parsed.season, parsed.episode) else {
+        warn_about(&item.path, "its name gives no episode number or air date");
         return false;
     };
     let last = parsed.episode_end.unwrap_or(first);
@@ -925,11 +934,13 @@ enum Placement {
 
 /// Places an episode file as its name says or, failing that and given a way to `ask`, as the
 /// episode the user names: by number (`s13e05`, `13x05`) or air date, after searching the
-/// episode titles if they like.
+/// episode titles if they like. An answer naming an episode not yet in `episodes` has `more`
+/// fetch the episodes around it, as a file whose name gives no number or date has none fetched.
 fn place_episode(
     item: &mut Item,
     parsed: &Parsed,
-    episodes: &[EpisodeInfo],
+    episodes: &mut Vec<EpisodeInfo>,
+    more: impl Fn(&Parsed) -> Vec<EpisodeInfo>,
     duration: Option<f64>,
     ask: Option<impl Fn(&str) -> Result<Option<String>>>,
 ) -> Result<Placement> {
@@ -940,7 +951,7 @@ fn place_episode(
         println!("    {}", paint("2", "Skipped."));
         Ok(Placement::Skipped)
     };
-    let Some(ask) = ask.filter(|_| !episodes.is_empty()) else {
+    let Some(ask) = ask else {
         return skip();
     };
     println!(
@@ -963,6 +974,17 @@ fn place_episode(
             let mut named = parsed.clone();
             (named.season, named.episode) = (given.season, given.episode);
             (named.episode_end, named.air_date) = (given.episode_end, given.air_date);
+            if listed(&named, episodes) == Some(false) {
+                let fetched: Vec<_> = more(&named)
+                    .into_iter()
+                    .filter(|new| {
+                        !episodes
+                            .iter()
+                            .any(|old| (old.season, old.number) == (new.season, new.number))
+                    })
+                    .collect();
+                episodes.extend(fetched);
+            }
             if apply_episode(item, &named, episodes, duration) {
                 let code = item.episode_code().unwrap_or_default();
                 println!("    {}", paint("32", &format!("Placed as {code}.")));
@@ -1523,6 +1545,7 @@ fn run_with(
     sources: &mut dyn Sources,
     resolve: Option<Resolve>,
 ) -> Result<()> {
+    let interactive = !options.quiet && io::stdin().is_terminal();
     let mut pending = Vec::new();
     let mut known = 0;
     for (path, root) in collect(&options.paths)? {
@@ -1543,15 +1566,20 @@ fn run_with(
             && parsed.kind != kind
         {
             if kind == Kind::Episode {
-                eprintln!(
-                    "warning: no episode number or air date in {}; skipping",
-                    path.display()
-                );
-                continue;
+                // Asked which episode it is once the show is matched.
+                if !interactive {
+                    eprintln!(
+                        "warning: no episode number or air date in {}; skipping",
+                        path.display()
+                    );
+                    continue;
+                }
+                (parsed.edition, parsed.part) = (None, None);
+            } else {
+                (parsed.season, parsed.episode, parsed.episode_end) = (None, None, None);
+                (parsed.air_date, parsed.episode_title) = (None, None);
             }
-            parsed.kind = Kind::Movie;
-            (parsed.season, parsed.episode, parsed.episode_end) = (None, None, None);
-            (parsed.air_date, parsed.episode_title) = (None, None);
+            parsed.kind = kind;
         }
         if parsed.title.is_empty() {
             eprintln!(
@@ -1576,7 +1604,6 @@ fn run_with(
         remux::check(&config.import.videoconverter)?;
     }
 
-    let interactive = !options.quiet && io::stdin().is_terminal();
     let mut importer = Importer {
         config,
         library,
@@ -1641,12 +1668,19 @@ fn run_with(
             }
         };
 
-        let episodes = match lookup {
-            Lookup::Show(source) => match candidate.episodes.take() {
-                Some(episodes) => episodes,
-                None => fetch_episodes(source, &candidate.id, &group.files),
-            },
-            Lookup::Movie(_) => Vec::new(),
+        let (mut episodes, shows) = match lookup {
+            Lookup::Show(source) => {
+                let episodes = candidate.episodes.take().unwrap_or_else(|| {
+                    fetch_episodes(source, &candidate.id, group.files.iter().map(|f| &f.parsed))
+                });
+                (episodes, Some(source))
+            }
+            Lookup::Movie(_) => (Vec::new(), None),
+        };
+        let more = |named: &Parsed| {
+            shows.map_or_else(Vec::new, |source| {
+                fetch_episodes(source, &candidate.id, [named])
+            })
         };
         for (index, file) in group.files.iter().enumerate() {
             let mut item = base_item(&group, file, &candidate);
@@ -1666,7 +1700,8 @@ fn run_with(
                     match place_episode(
                         &mut item,
                         &file.parsed,
-                        &episodes,
+                        &mut episodes,
+                        more,
                         duration,
                         interactive.then_some(prompt),
                     )? {
@@ -2152,7 +2187,7 @@ mod tests {
             pending("/in/Show.S01E02.mkv"),
             pending("/in/Show.S03E01.mkv"),
         ];
-        let episodes = fetch_episodes(&shows, "1", &files);
+        let episodes = fetch_episodes(&shows, "1", files.iter().map(|f| &f.parsed));
         assert_eq!(*shows.requested.borrow(), [Some(1), Some(3)]);
         assert_eq!(episodes.len(), 2);
     }
@@ -2164,7 +2199,7 @@ mod tests {
             pending("/in/Show.2011.11.15.mkv"),
             pending("/in/Show.S01E01.mkv"),
         ];
-        fetch_episodes(&shows, "1", &files);
+        fetch_episodes(&shows, "1", files.iter().map(|f| &f.parsed));
         assert_eq!(*shows.requested.borrow(), [None]);
     }
 
@@ -2175,7 +2210,7 @@ mod tests {
             ..StubShows::default()
         };
         let files = [pending("/in/Show.S01E01.mkv")];
-        assert!(fetch_episodes(&shows, "1", &files).is_empty());
+        assert!(fetch_episodes(&shows, "1", files.iter().map(|f| &f.parsed)).is_empty());
     }
 
     /// Two shows of the same name: a six-part miniseries and a long-running series.
@@ -2391,8 +2426,15 @@ mod tests {
                 "/in/s.mkv".into(),
                 "Rosamunde Pilcher".into(),
             );
-            let placement =
-                place_episode(&mut item, &parsed, &anthology, Some(5400.0), Some(ask)).unwrap();
+            let placement = place_episode(
+                &mut item,
+                &parsed,
+                &mut anthology.to_vec(),
+                |_| Vec::new(),
+                Some(5400.0),
+                Some(ask),
+            )
+            .unwrap();
             (placement, item)
         };
         let place = |answers: &[&str]| {
@@ -2426,9 +2468,44 @@ mod tests {
         );
         let never = None::<fn(&str) -> Result<Option<String>>>;
         assert_eq!(
-            place_episode(&mut item, &parsed, &anthology, None, never).unwrap(),
+            place_episode(
+                &mut item,
+                &parsed,
+                &mut anthology.to_vec(),
+                |_| Vec::new(),
+                None,
+                never
+            )
+            .unwrap(),
             Placement::Skipped
         );
+    }
+
+    #[test]
+    fn a_file_without_a_date_is_placed_by_the_date_given() {
+        let fixture = EpisodeInfo {
+            season: 2024,
+            number: 3,
+            title: Some("Bahrain Grand Prix".into()),
+            air_date: Some("2024-03-02".into()),
+            runtime: None,
+        };
+        let parsed = parse::parse_name("Formula 1 Bahrain Grand Prix");
+        let mut item = Item::new(Kind::Episode, "/in/f1.mkv".into(), "Formula 1".into());
+        let asked_for = RefCell::new(Vec::new());
+        let more = |named: &Parsed| {
+            asked_for.borrow_mut().push(named.air_date.clone());
+            vec![fixture.clone()]
+        };
+        let ask = |_: &str| Ok(Some("2024-03-02".to_string()));
+        let mut episodes = Vec::new();
+        assert_eq!(
+            place_episode(&mut item, &parsed, &mut episodes, more, None, Some(ask)).unwrap(),
+            Placement::Placed
+        );
+        assert_eq!(*asked_for.borrow(), [Some("2024-03-02".to_string())]);
+        assert_eq!((item.season, item.episode), (Some(2024), Some(3)));
+        assert_eq!(item.episode_title.as_deref(), Some("Bahrain Grand Prix"));
     }
 
     #[test]
