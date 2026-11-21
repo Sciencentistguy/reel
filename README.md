@@ -275,7 +275,8 @@ took place that day, as a day of a football league's fixtures did, the words aft
 one whose name they clearly match (`Arsenal v Spurs` finds `Arsenal vs Spurs`); a file that doesn't
 say which is asked about or skipped, as is one whose name gives no date at all, once its league is
 matched: the date you give fetches that season's events. A link to the event's page on
-TheSportsDB (`https://www.thesportsdb.com/event/2408215-…`) gives its date and name in one go. Dates are TheSportsDB's, which are UTC, so a recording of a
+TheSportsDB (`https://www.thesportsdb.com/event/2408215-…`) gives its date and name in one go, and given when asked for a league's ID, it enters the event's
+league. Dates are TheSportsDB's, which are UTC, so a recording of a
 late kick-off may need the next day's date. `reel rescan` scans the sport folder this way too, and
 `reel rescan --sport PATH` does for other folders. `sync`, `missing`, `check` and `unmatched` treat
 leagues as they do shows. Events carry no running time, so files are never rejected for their length.

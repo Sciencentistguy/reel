@@ -214,6 +214,18 @@ impl TheSportsDb {
         Ok(found.events.unwrap_or_default())
     }
 
+    /// The event with ID `id`, and the ID of its league.
+    fn event(&self, id: &str) -> Result<(Event, String)> {
+        let found: Events = self.get("lookupevent.php", &[("id", id)])?;
+        let Some(mut event) = found.events.unwrap_or_default().into_iter().next() else {
+            anyhow::bail!("TheSportsDB: no event {id}");
+        };
+        let Some(league) = non_empty(event.league_id.take()) else {
+            anyhow::bail!("TheSportsDB: event {id} belongs to no league");
+        };
+        Ok((event, league))
+    }
+
     /// The events of `seasons`, numbered within each starting year in the order they take place.
     fn fetch_seasons(&self, id: &str, seasons: SeasonsByStart) -> Result<Vec<EpisodeInfo>> {
         let mut episodes = Vec::new();
@@ -284,8 +296,20 @@ impl ShowSource for TheSportsDb {
             .collect())
     }
 
+    /// Takes a league's ID or page URL, or an event's page URL for the league it is part of.
     fn show(&self, id: &str) -> Result<Candidate> {
-        let id = entered_id(id);
+        let league;
+        let id = match event_id(id) {
+            Some(event) => {
+                league = self.event(event)?.1;
+                &league
+            }
+            None => entered_id(id),
+        };
+        anyhow::ensure!(
+            !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()),
+            "TheSportsDB: {id:?} is not a league ID, nor a league or event page URL"
+        );
         let found: Leagues<League> = self.get("lookupleague.php", &[("id", id)])?;
         let Some(league) = found.leagues.unwrap_or_default().into_iter().next() else {
             anyhow::bail!("TheSportsDB: no league {id}");
@@ -347,13 +371,7 @@ impl ShowSource for TheSportsDb {
         let Some(id) = event_id(input) else {
             return Ok(None);
         };
-        let found: Events = self.get("lookupevent.php", &[("id", id)])?;
-        let Some(event) = found.events.unwrap_or_default().into_iter().next() else {
-            anyhow::bail!("TheSportsDB: no event {id}");
-        };
-        let Some(show_id) = non_empty(event.league_id) else {
-            anyhow::bail!("TheSportsDB: event {id} belongs to no league");
-        };
+        let (event, show_id) = self.event(id)?;
         Ok(Some(LinkedEpisode {
             show_id,
             show: non_empty(event.league),
@@ -487,6 +505,20 @@ mod tests {
             })
         );
         assert_eq!(client.linked_episode("Las Vegas").unwrap(), None);
+        let league = client
+            .show("https://www.thesportsdb.com/event/2408215-las-vegas-grand-prix-qualifying")
+            .unwrap();
+        assert_eq!(
+            (league.id.as_str(), league.title.as_str()),
+            ("4370", "Formula 1")
+        );
+        assert!(
+            client
+                .show("Formula 1")
+                .unwrap_err()
+                .to_string()
+                .contains("not a league ID")
+        );
         assert_eq!(client.linked_episode("2026").unwrap(), None);
         assert!(
             client
