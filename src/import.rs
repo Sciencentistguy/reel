@@ -934,13 +934,14 @@ enum Placement {
 
 /// Places an episode file as its name says or, failing that and given a way to `ask`, as the
 /// episode the user names: by number (`s13e05`, `13x05`) or air date, after searching the
-/// episode titles if they like. An answer naming an episode not yet in `episodes` has `more`
-/// fetch the episodes around it, as a file whose name gives no number or date has none fetched.
+/// episode titles if they like, or by a link to the episode's page on the `show`'s source. An
+/// answer naming an episode not yet in `episodes` fetches the episodes around it from `show`, as
+/// a file whose name gives no number or date has none fetched.
 fn place_episode(
     item: &mut Item,
     parsed: &Parsed,
     episodes: &mut Vec<EpisodeInfo>,
-    more: impl Fn(&Parsed) -> Vec<EpisodeInfo>,
+    show: Option<(&dyn ShowSource, &str)>,
     duration: Option<f64>,
     ask: Option<impl Fn(&str) -> Result<Option<String>>>,
 ) -> Result<Placement> {
@@ -969,60 +970,100 @@ fn place_episode(
         if answer.is_empty() {
             return skip();
         }
-        let given = parse::parse_name(&format!("Show {answer}"));
-        if given.air_date.is_some() || (given.season.is_some() && given.episode.is_some()) {
-            let mut named = parsed.clone();
-            (named.season, named.episode) = (given.season, given.episode);
-            (named.episode_end, named.air_date) = (given.episode_end, given.air_date);
-            if listed(&named, episodes) == Some(false) {
-                let fetched: Vec<_> = more(&named)
-                    .into_iter()
-                    .filter(|new| {
-                        !episodes
-                            .iter()
-                            .any(|old| (old.season, old.number) == (new.season, new.number))
-                    })
-                    .collect();
-                episodes.extend(fetched);
+        let note = |text: &str| println!("      {}", paint("2", text));
+        let linked = match show.map(|(source, _)| source.linked_episode(&answer)) {
+            Some(Ok(linked)) => linked,
+            Some(Err(err)) => {
+                note(&format!("{err:#}"));
+                continue;
             }
-            if apply_episode(item, &named, episodes, duration) {
-                let code = item.episode_code().unwrap_or_default();
-                println!("    {}", paint("32", &format!("Placed as {code}.")));
-                return Ok(Placement::Placed);
+            None => None,
+        };
+        let mut named = parsed.clone();
+        if let Some(linked) = &linked {
+            if show.is_some_and(|(_, id)| id != linked.show_id) {
+                let other = linked.show.as_deref().unwrap_or(&linked.show_id);
+                note(&format!("That is from {other}, not {}.", item.title));
+                continue;
             }
-            continue;
+            if linked.air_date.is_none() {
+                note("Its page gives no date; give its number instead.");
+                continue;
+            }
+            (named.season, named.episode, named.episode_end) = (None, None, None);
+            (named.air_date, named.episode_title) = (linked.air_date.clone(), linked.title.clone());
+        } else {
+            let given = parse::parse_name(&format!("Show {answer}"));
+            if given.air_date.is_some() || (given.season.is_some() && given.episode.is_some()) {
+                (named.season, named.episode) = (given.season, given.episode);
+                (named.episode_end, named.air_date) = (given.episode_end, given.air_date);
+                if given.episode_title.is_some() {
+                    named.episode_title = given.episode_title;
+                }
+            } else {
+                search_episodes(episodes, &answer);
+                continue;
+            }
         }
-        let words = answer.to_lowercase();
-        let found: Vec<_> = episodes
-            .iter()
-            .filter(|episode| {
-                let title = episode.title.as_ref();
-                title.is_some_and(|title| title.to_lowercase().contains(&words))
-                    || episode
-                        .air_date
-                        .as_ref()
-                        .is_some_and(|date| date.starts_with(&words))
-            })
-            .collect();
-        if found.is_empty() {
-            println!(
-                "      {}",
-                paint(
-                    "2",
-                    &format!("No episode's title or air date matches {answer:?}.")
-                )
-            );
+        if let Some((source, id)) = show
+            && listed(&named, episodes) == Some(false)
+        {
+            let fetched: Vec<_> = fetch_episodes(source, id, [&named])
+                .into_iter()
+                .filter(|new| {
+                    !episodes
+                        .iter()
+                        .any(|old| (old.season, old.number) == (new.season, new.number))
+                })
+                .collect();
+            episodes.extend(fetched);
         }
-        for episode in found.iter().take(SEARCH_RESULTS) {
-            println!("      {}", describe_listed(episode));
+        if apply_episode(item, &named, episodes, duration) {
+            let code = item.episode_code().unwrap_or_default();
+            println!("    {}", paint("32", &format!("Placed as {code}.")));
+            return Ok(Placement::Placed);
         }
-        if found.len() > SEARCH_RESULTS {
-            let more = found.len() - SEARCH_RESULTS;
-            println!(
-                "      {}",
-                paint("2", &format!("… and {more} more; search more narrowly."))
-            );
+        if let Some(linked) = linked {
+            let title = linked.title.as_deref().unwrap_or("It");
+            note(&format!(
+                "{title} isn't in the episode list fetched, which may stop short of it."
+            ));
         }
+    }
+}
+
+/// Lists the episodes whose title or air date matches `answer`.
+fn search_episodes(episodes: &[EpisodeInfo], answer: &str) {
+    let words = answer.to_lowercase();
+    let found: Vec<_> = episodes
+        .iter()
+        .filter(|episode| {
+            let title = episode.title.as_ref();
+            title.is_some_and(|title| title.to_lowercase().contains(&words))
+                || episode
+                    .air_date
+                    .as_ref()
+                    .is_some_and(|date| date.starts_with(&words))
+        })
+        .collect();
+    if found.is_empty() {
+        println!(
+            "      {}",
+            paint(
+                "2",
+                &format!("No episode's title or air date matches {answer:?}.")
+            )
+        );
+    }
+    for episode in found.iter().take(SEARCH_RESULTS) {
+        println!("      {}", describe_listed(episode));
+    }
+    if found.len() > SEARCH_RESULTS {
+        let more = found.len() - SEARCH_RESULTS;
+        println!(
+            "      {}",
+            paint("2", &format!("… and {more} more; search more narrowly."))
+        );
     }
 }
 
@@ -1677,11 +1718,6 @@ fn run_with(
             }
             Lookup::Movie(_) => (Vec::new(), None),
         };
-        let more = |named: &Parsed| {
-            shows.map_or_else(Vec::new, |source| {
-                fetch_episodes(source, &candidate.id, [named])
-            })
-        };
         for (index, file) in group.files.iter().enumerate() {
             let mut item = base_item(&group, file, &candidate);
             let media = importer.media(&mut probes, index);
@@ -1701,7 +1737,7 @@ fn run_with(
                         &mut item,
                         &file.parsed,
                         &mut episodes,
-                        more,
+                        shows.map(|source| (source, candidate.id.as_str())),
                         duration,
                         interactive.then_some(prompt),
                     )? {
@@ -1760,6 +1796,7 @@ fn run_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::LinkedEpisode;
 
     #[test]
     fn colours_percentages_by_quality() {
@@ -2430,7 +2467,7 @@ mod tests {
                 &mut item,
                 &parsed,
                 &mut anthology.to_vec(),
-                |_| Vec::new(),
+                None,
                 Some(5400.0),
                 Some(ask),
             )
@@ -2472,7 +2509,7 @@ mod tests {
                 &mut item,
                 &parsed,
                 &mut anthology.to_vec(),
-                |_| Vec::new(),
+                None,
                 None,
                 never
             )
@@ -2481,31 +2518,112 @@ mod tests {
         );
     }
 
+    /// A league whose events are fetched only by date, and linked to as `/event/<n>`.
+    #[derive(Default)]
+    struct League {
+        fetched: RefCell<Vec<BTreeSet<String>>>,
+    }
+
+    impl ShowSource for League {
+        fn name(&self) -> &'static str {
+            "thesportsdb"
+        }
+
+        fn search_shows(&self, _: &str, _: Option<i32>) -> Result<Vec<Candidate>> {
+            unreachable!()
+        }
+
+        fn show(&self, _: &str) -> Result<Candidate> {
+            unreachable!()
+        }
+
+        fn episodes(&self, _: &str, _: Option<u32>) -> Result<Vec<EpisodeInfo>> {
+            unreachable!("only the seasons around a date are fetched")
+        }
+
+        fn episodes_aired(&self, _: &str, dates: &BTreeSet<String>) -> Result<Vec<EpisodeInfo>> {
+            self.fetched.borrow_mut().push(dates.clone());
+            let event = |number, title: &str| EpisodeInfo {
+                season: 2024,
+                number,
+                title: Some(title.into()),
+                air_date: Some("2024-03-02".into()),
+                runtime: None,
+            };
+            Ok(vec![
+                event(3, "Bahrain Grand Prix Qualifying"),
+                event(4, "Bahrain Grand Prix"),
+            ])
+        }
+
+        fn linked_episode(&self, input: &str) -> Result<Option<LinkedEpisode>> {
+            let linked = |league: &str| LinkedEpisode {
+                show_id: league.into(),
+                show: (league != "4370").then(|| "Formula 2".into()),
+                title: Some("Bahrain Grand Prix Qualifying".into()),
+                air_date: Some("2024-03-02".into()),
+            };
+            Ok(
+                match input
+                    .rsplit_once("/event/")
+                    .and_then(|(_, id)| id.split('-').next())
+                {
+                    Some("1") => Some(linked("4370")),
+                    Some("2") => Some(linked("4486")),
+                    _ => None,
+                },
+            )
+        }
+    }
+
+    fn place_undated(answers: &[&str]) -> (Placement, Item, League) {
+        let league = League::default();
+        let parsed = parse::parse_name("Formula 1 Bahrain");
+        let mut item = Item::new(Kind::Episode, "/in/f1.mkv".into(), "Formula 1".into());
+        let answers = RefCell::new(answers.to_vec());
+        let ask = |_: &str| {
+            let mut answers = answers.borrow_mut();
+            Ok((!answers.is_empty()).then(|| answers.remove(0).to_string()))
+        };
+        let placement = place_episode(
+            &mut item,
+            &parsed,
+            &mut Vec::new(),
+            Some((&league, "4370")),
+            None,
+            Some(ask),
+        )
+        .unwrap();
+        (placement, item, league)
+    }
+
     #[test]
     fn a_file_without_a_date_is_placed_by_the_date_given() {
-        let fixture = EpisodeInfo {
-            season: 2024,
-            number: 3,
-            title: Some("Bahrain Grand Prix".into()),
-            air_date: Some("2024-03-02".into()),
-            runtime: None,
-        };
-        let parsed = parse::parse_name("Formula 1 Bahrain Grand Prix");
-        let mut item = Item::new(Kind::Episode, "/in/f1.mkv".into(), "Formula 1".into());
-        let asked_for = RefCell::new(Vec::new());
-        let more = |named: &Parsed| {
-            asked_for.borrow_mut().push(named.air_date.clone());
-            vec![fixture.clone()]
-        };
-        let ask = |_: &str| Ok(Some("2024-03-02".to_string()));
-        let mut episodes = Vec::new();
+        let (placement, item, league) = place_undated(&["2024-03-02 Bahrain Grand Prix"]);
+        assert_eq!(placement, Placement::Placed);
         assert_eq!(
-            place_episode(&mut item, &parsed, &mut episodes, more, None, Some(ask)).unwrap(),
-            Placement::Placed
+            *league.fetched.borrow(),
+            [BTreeSet::from(["2024-03-02".to_string()])]
         );
-        assert_eq!(*asked_for.borrow(), [Some("2024-03-02".to_string())]);
+        assert_eq!((item.season, item.episode), (Some(2024), Some(4)));
+    }
+
+    #[test]
+    fn a_file_is_placed_by_a_link_to_its_event() {
+        let (placement, item, _) = place_undated(&["https://example.com/event/1-qualifying"]);
+        assert_eq!(placement, Placement::Placed);
         assert_eq!((item.season, item.episode), (Some(2024), Some(3)));
-        assert_eq!(item.episode_title.as_deref(), Some("Bahrain Grand Prix"));
+        assert_eq!(
+            item.episode_title.as_deref(),
+            Some("Bahrain Grand Prix Qualifying")
+        );
+
+        let (placement, ..) = place_undated(&["https://example.com/event/2-qualifying", ""]);
+        assert_eq!(
+            placement,
+            Placement::Skipped,
+            "another league's event asks again"
+        );
     }
 
     #[test]

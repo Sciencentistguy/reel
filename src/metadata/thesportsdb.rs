@@ -8,7 +8,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use super::{Candidate, EpisodeInfo, Http, ShowSource, non_empty, normalise};
+use super::{Candidate, EpisodeInfo, Http, LinkedEpisode, ShowSource, non_empty, normalise};
 use crate::config::MetadataConfig;
 
 const BASE: &str = "https://www.thesportsdb.com/api/v1/json";
@@ -80,6 +80,20 @@ struct Event {
     date: Option<String>,
     #[serde(rename = "strTimestamp")]
     timestamp: Option<String>,
+    #[serde(rename = "idLeague")]
+    league_id: Option<String>,
+    #[serde(rename = "strLeague")]
+    league: Option<String>,
+}
+
+/// The event ID in an event page URL such as
+/// `https://www.thesportsdb.com/event/2408215-las-vegas-grand-prix-qualifying`.
+fn event_id(input: &str) -> Option<&str> {
+    let (_, rest) = input.trim().split_once("/event/")?;
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    Some(&rest[..end]).filter(|id| !id.is_empty())
 }
 
 fn league_url(id: &str) -> String {
@@ -328,6 +342,25 @@ impl ShowSource for TheSportsDb {
         }
         self.fetch_seasons(id, wanted)
     }
+
+    fn linked_episode(&self, input: &str) -> Result<Option<LinkedEpisode>> {
+        let Some(id) = event_id(input) else {
+            return Ok(None);
+        };
+        let found: Events = self.get("lookupevent.php", &[("id", id)])?;
+        let Some(event) = found.events.unwrap_or_default().into_iter().next() else {
+            anyhow::bail!("TheSportsDB: no event {id}");
+        };
+        let Some(show_id) = non_empty(event.league_id) else {
+            anyhow::bail!("TheSportsDB: event {id} belongs to no league");
+        };
+        Ok(Some(LinkedEpisode {
+            show_id,
+            show: non_empty(event.league),
+            title: non_empty(event.name),
+            air_date: non_empty(event.date),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +413,12 @@ mod tests {
                         "strDescriptionEN": "The highest class of single-seater racing."}]}"#,
                 ),
                 "lookupleague.php" => ok(r#"{"leagues": null}"#),
+                "lookupevent.php" if request.param("id").as_deref() == Some("2408215") => {
+                    ok(r#"{"events": [{"idEvent": "2408215", "idLeague": "4370",
+                        "strLeague": "Formula 1", "strEvent": "Las Vegas Grand Prix Qualifying",
+                        "dateEvent": "2026-11-21", "strTimestamp": "2026-11-21T04:00:00"}]}"#)
+                }
+                "lookupevent.php" => ok(r#"{"events": null}"#),
                 "search_all_seasons.php" => ok(
                     r#"{"seasons": [{"strSeason": "2022-2023"}, {"strSeason": "2023-2024"},
                         {"strSeason": "2024-2025"}]}"#,
@@ -427,6 +466,35 @@ mod tests {
         );
         assert!(client.search_shows("Curling", None).unwrap().is_empty());
         assert_eq!(server.paths().len(), 1);
+    }
+
+    #[test]
+    fn events_are_looked_up_by_page_url() {
+        let server = league_server();
+        let client = client(&server, "key");
+        let linked = client
+            .linked_episode(
+                "https://www.thesportsdb.com/event/2408215-las-vegas-grand-prix-qualifying",
+            )
+            .unwrap();
+        assert_eq!(
+            linked,
+            Some(LinkedEpisode {
+                show_id: "4370".into(),
+                show: Some("Formula 1".into()),
+                title: Some("Las Vegas Grand Prix Qualifying".into()),
+                air_date: Some("2026-11-21".into()),
+            })
+        );
+        assert_eq!(client.linked_episode("Las Vegas").unwrap(), None);
+        assert_eq!(client.linked_episode("2026").unwrap(), None);
+        assert!(
+            client
+                .linked_episode("https://www.thesportsdb.com/event/1")
+                .unwrap_err()
+                .to_string()
+                .contains("no event 1")
+        );
     }
 
     #[test]

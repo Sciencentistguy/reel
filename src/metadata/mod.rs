@@ -97,6 +97,19 @@ pub trait ShowSource {
     fn episodes_aired(&self, id: &str, _dates: &BTreeSet<String>) -> Result<Vec<EpisodeInfo>> {
         self.episodes(id, None)
     }
+    /// The episode a link to the source's page for it names, if `input` is such a link.
+    fn linked_episode(&self, _input: &str) -> Result<Option<LinkedEpisode>> {
+        Ok(None)
+    }
+}
+
+/// An episode named by a link to its page, as far as the page says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedEpisode {
+    pub show_id: String,
+    pub show: Option<String>,
+    pub title: Option<String>,
+    pub air_date: Option<String>,
 }
 
 /// Why no single episode aired on a date could be chosen.
